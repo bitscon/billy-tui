@@ -43,7 +43,11 @@ func (m model) View() string {
 
 	// Build chat content from pre-styled display messages
 	content := strings.Join(m.displayMessages, "\n")
-	if m.thinking {
+	if m.isStreaming {
+		rendered := renderMarkdown(m.streamBuffer, m.chatViewport.Width)
+		rendered = strings.TrimLeft(rendered, "\n")
+		content += "\n" + BillyResponseStyle.Render("[Billy] ") + rendered + " █"
+	} else if m.thinking {
 		content += "\n" + m.spinner.View() + " Billy is thinking..."
 	}
 	m.chatViewport.SetContent(content)

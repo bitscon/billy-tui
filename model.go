@@ -23,11 +23,23 @@ type model struct {
 	lastGovernanceEvent  string
 	saveStatus           string
 	saveStatusTicks      int
+	isStreaming     bool
+	streamBuffer    string
 }
 
 type responseMsg struct{ text string }
 type errMsg struct{ text string }
 type healthResultMsg struct{ err error }
+type StreamChunkMsg struct {
+	Chunk  string
+	Prompt string
+	events <-chan streamEvent
+}
+type StreamDoneMsg struct{ FullText string }
+type StreamErrMsg struct {
+	Prompt string
+	Err    error
+}
 
 func initialModel(client *billyClient) model {
 	ti := textinput.New()

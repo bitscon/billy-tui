@@ -13,6 +13,7 @@ Git repository initialized for `bitscon/billy-tui`; initial scaffold commit reco
 - [Step 74] Sidebar live data — telemetry polling, governance border on tool.call.denied
 - [Step 75] Chat export — ctrl+s saves session to ~/billy-chat-debug-latest.md (markdown); timestamped archive in debug/; status bar confirms ✓
 - [Step 82] Repository initialized — local git history created; remote origin set to git@github.com:bitscon/billy-tui.git
+- [Streaming Parity Phase 3] Enter-key submit guard — blocks overlapping session submits while response is in progress
 
 ## Next Steps
 - TBD

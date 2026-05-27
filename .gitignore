@@ -3,3 +3,4 @@ debug/*.md
 *.exe
 *.test
 /tmp/
+billy-tui

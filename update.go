@@ -12,6 +12,16 @@ import (
 
 type sidebarTickMsg struct{}
 
+func waitForStream(events <-chan streamEvent, prompt string) tea.Cmd {
+	return func() tea.Msg {
+		return nextStreamMessage(events, prompt)
+	}
+}
+
+func (m *model) appendStreamChunk(chunk string) {
+	m.streamBuffer += chunk
+}
+
 func (m model) Init() tea.Cmd {
 	healthCmd := func() tea.Msg {
 		err := m.client.Health()
@@ -76,8 +86,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, msg.text)
 		m.displayMessages = append(m.displayMessages, ErrorStyle.Render(msg.text))
 		m.thinking = false
+		m.isStreaming = false
 		m.updateChatViewport()
 		return m, nil
+
+	case StreamChunkMsg:
+		if msg.Chunk != "" {
+			m.appendStreamChunk(msg.Chunk)
+		}
+		m.isStreaming = true
+		m.thinking = false
+		m.updateChatViewport()
+		return m, waitForStream(msg.events, msg.Prompt)
+
+	case StreamDoneMsg:
+		if msg.FullText != "" {
+			rendered := renderMarkdown(msg.FullText, m.chatViewport.Width)
+			rendered = strings.TrimLeft(rendered, "\n")
+			m.messages = append(m.messages, "[Billy] "+msg.FullText)
+			m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
+		}
+		m.streamBuffer = ""
+		m.isStreaming = false
+		m.thinking = false
+		m.updateChatViewport()
+		return m, nil
+
+	case StreamErrMsg:
+		m.streamBuffer = ""
+		m.isStreaming = false
+		m.thinking = true
+		if msg.Prompt == "" {
+			m.thinking = false
+			m.messages = append(m.messages, "⚠️  streaming error")
+			m.displayMessages = append(m.displayMessages, ErrorStyle.Render("⚠️  streaming error"))
+			m.updateChatViewport()
+			return m, nil
+		}
+		return m, ask(msg.Prompt, m.client.sessionID, m.client.baseURL)
 
 	case sidebarTickMsg:
 		// poll runtime status
@@ -142,6 +188,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter":
+			if m.isStreaming || m.thinking {
+				m.saveStatus = "Wait for current response before sending another message"
+				m.saveStatusTicks = 2
+				return m, nil
+			}
 			if m.input.Value() == "" {
 				return m, nil
 			}
@@ -150,15 +201,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+userMsg))
 			m.input.Reset()
 			m.thinking = true
+			m.isStreaming = true
+			m.streamBuffer = ""
 			m.updateChatViewport()
-			askCmd := func() tea.Msg {
-				text, err := m.client.Ask(userMsg)
-				if err != nil {
-					return errMsg{text: "⚠️  " + err.Error()}
-				}
-				return responseMsg{text: text}
-			}
-			return m, askCmd
+			return m, askStream(userMsg, m.client.sessionID, m.client.baseURL)
 		case "ctrl+s":
 			path, err := saveChat(m.messages, m.client.sessionID)
 			if err != nil {
