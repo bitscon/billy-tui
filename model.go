@@ -1,36 +1,83 @@
 package main
 
 import (
+	"time"
+
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/charmbracelet/glamour"
+)
+
+type pane int
+
+const (
+	paneInput pane = iota
+	paneChat
 )
 
 type model struct {
-	width                int
-	height               int
-	chatViewport         viewport.Model
-	sidebarWidth         int
-	input                textinput.Model
-	messages             []string
-	displayMessages      []string
-	ready                bool
-	spinner              spinner.Model
-	thinking             bool
+	// layout
+	width        int
+	height       int
+	focusedPane  pane
+	chatViewport viewport.Model
+	sidebarWidth int
+	ready        bool
+
+	// chat content
+	messages        []string
+	displayMessages []string
+	liveMsg         string
+
+	// input — textarea supports programmatic SetValue() for future voice injection
+	input      textarea.Model
+	draftInput string // saved when navigating history
+	voiceReady bool   // stub: true when audio device is available (Phase 4)
+
+	// input history ring buffer (max 50)
+	inputHistory []string
+	historyIdx   int // -1 = not navigating; ≥0 = index into history (0=newest)
+
+	// command palette
+	commandMode  bool
+	commandInput textinput.Model
+
+	// UI overlays
+	showHelp bool
+
+	// spinner / response state
+	spinner      spinner.Model
+	thinking     bool
+	isStreaming  bool
+	streamBuffer string
+	streamTokens int
+
+	// timing
+	requestStarted time.Time
+	lastLatency    time.Duration
+
+	// runtime
 	client               *billyClient
 	sidebar              sidebarState
 	governanceAlertTicks int
 	lastGovernanceEvent  string
-	saveStatus           string
-	saveStatusTicks      int
-	isStreaming  bool
-	streamBuffer string
-	liveMsg      string // current in-progress line shown below stable viewport
+
+	// notifications
+	saveStatus      string
+	saveStatusTicks int
+
+	// markdown renderer — created once, recreated on resize (Phase 3b)
+	mdRenderer *glamour.TermRenderer
 }
+
+// --- message types ---
 
 type responseMsg struct{ text string }
 type errMsg struct{ text string }
 type healthResultMsg struct{ err error }
+
 type StreamChunkMsg struct {
 	Chunk  string
 	Prompt string
@@ -42,10 +89,31 @@ type StreamErrMsg struct {
 	Err    error
 }
 
+// --- constructors ---
+
+func newMdRenderer(width int) *glamour.TermRenderer {
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStylePath("dark"),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return nil
+	}
+	return r
+}
+
 func initialModel(client *billyClient) model {
-	ti := textinput.New()
-	ti.Placeholder = "Type a message..."
+	ti := textarea.New()
+	ti.Placeholder = "Message Billy…   ↑/↓ history   ? help   :command"
+	ti.ShowLineNumbers = false
+	ti.CharLimit = 4096
+	ti.SetHeight(1)
 	ti.Focus()
+
+	ci := textinput.New()
+	ci.Placeholder = "type a command…"
+	ci.Prompt = ""
+	ci.CharLimit = 256
 
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 
@@ -56,8 +124,12 @@ func initialModel(client *billyClient) model {
 		displayMessages: []string{
 			BillyResponseStyle.Render("[Billy] ") + "Hey. What can I build for you?",
 		},
-		input:   ti,
-		spinner: sp,
-		client:  client,
+		input:        ti,
+		commandInput: ci,
+		spinner:      sp,
+		client:       client,
+		historyIdx:   -1,
+		focusedPane:  paneInput,
+		mdRenderer:   newMdRenderer(80),
 	}
 }
