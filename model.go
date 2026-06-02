@@ -23,8 +23,9 @@ type model struct {
 	lastGovernanceEvent  string
 	saveStatus           string
 	saveStatusTicks      int
-	isStreaming     bool
-	streamBuffer    string
+	isStreaming  bool
+	streamBuffer string
+	liveMsg      string // current in-progress line shown below stable viewport
 }
 
 type responseMsg struct{ text string }

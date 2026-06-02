@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -41,18 +40,7 @@ func (m model) View() string {
 	}
 	statusBar := StatusBarStyle.Width(m.width).Render(statusText)
 
-	// Build chat content from pre-styled display messages
-	content := strings.Join(m.displayMessages, "\n")
-	if m.isStreaming {
-		rendered := renderMarkdown(m.streamBuffer, m.chatViewport.Width)
-		rendered = strings.TrimLeft(rendered, "\n")
-		content += "\n" + BillyResponseStyle.Render("[Billy] ") + rendered + " █"
-	} else if m.thinking {
-		content += "\n" + m.spinner.View() + " Billy is thinking..."
-	}
-	m.chatViewport.SetContent(content)
-
-	// Chat pane
+	// Chat pane — content managed exclusively by updateChatViewport() in Update()
 	chatPane := lipgloss.NewStyle().
 		Width(chatWidth).
 		Height(m.height - 4).

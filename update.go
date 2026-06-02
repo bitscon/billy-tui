@@ -33,7 +33,11 @@ func (m model) Init() tea.Cmd {
 
 func (m *model) updateChatViewport() {
 	if m.ready {
-		m.chatViewport.SetContent(strings.Join(m.displayMessages, "\n"))
+		content := strings.Join(m.displayMessages, "\n")
+		if m.liveMsg != "" {
+			content += "\n" + m.liveMsg
+		}
+		m.chatViewport.SetContent(content)
 		m.chatViewport.GotoBottom()
 	}
 }
@@ -62,6 +66,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		if m.thinking && !m.isStreaming {
+			m.liveMsg = m.spinner.View() + " Billy is thinking…"
+			m.updateChatViewport()
+		}
 		return m, cmd
 
 	case healthResultMsg:
@@ -79,6 +87,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, "[Billy] "+msg.text)
 		m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
 		m.thinking = false
+		m.liveMsg = ""
 		m.updateChatViewport()
 		return m, nil
 
@@ -87,12 +96,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.displayMessages = append(m.displayMessages, ErrorStyle.Render(msg.text))
 		m.thinking = false
 		m.isStreaming = false
+		m.liveMsg = ""
 		m.updateChatViewport()
 		return m, nil
 
 	case StreamChunkMsg:
 		if msg.Chunk != "" {
 			m.appendStreamChunk(msg.Chunk)
+			m.liveMsg = BillyResponseStyle.Render("[Billy] ") + m.streamBuffer + " █"
 		}
 		m.isStreaming = true
 		m.thinking = false
@@ -106,6 +117,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, "[Billy] "+msg.FullText)
 			m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
 		}
+		m.liveMsg = ""
 		m.streamBuffer = ""
 		m.isStreaming = false
 		m.thinking = false
@@ -115,6 +127,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StreamErrMsg:
 		m.streamBuffer = ""
 		m.isStreaming = false
+		m.liveMsg = ""
 		m.thinking = true
 		if msg.Prompt == "" {
 			m.thinking = false
@@ -203,6 +216,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinking = true
 			m.isStreaming = true
 			m.streamBuffer = ""
+			m.liveMsg = BillyResponseStyle.Render("[Billy] ") + " █"
 			m.updateChatViewport()
 			return m, askStream(userMsg, m.client.sessionID, m.client.baseURL)
 		case "ctrl+s":
@@ -214,7 +228,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.saveStatusTicks = 4
 			return m, nil
-		case "q", "ctrl+c":
+		case "ctrl+c":
 			return m, tea.Quit
 		}
 	}
