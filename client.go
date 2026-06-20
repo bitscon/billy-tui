@@ -254,3 +254,48 @@ func (c *billyClient) ActiveJobs() ([]ActiveJob, error) {
 	}
 	return payload.Items, nil
 }
+
+// LLMProviderInfo mirrors GET /api/v1/llm/models entries.
+type LLMProviderInfo struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	DefaultModel   string   `json:"default_model"`
+	RequiresAPIKey bool     `json:"requires_api_key"`
+	Models         []string `json:"models"`
+}
+
+func (c *billyClient) ListModels() ([]LLMProviderInfo, error) {
+	var out []LLMProviderInfo
+	if err := c.getJSON("/api/v1/llm/models", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SetLLMConfig switches the active provider/model via the sanctioned operator API
+// (POST /api/v1/llm/config) — the immediate rebuild+swap path. An empty model
+// asks the runtime to use the provider default.
+func (c *billyClient) SetLLMConfig(provider, model, baseURL string) (*LLMConfig, error) {
+	payload := map[string]string{"provider": provider}
+	if model != "" {
+		payload["model"] = model
+	}
+	if baseURL != "" {
+		payload["base_url"] = baseURL
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := c.http.Post(c.baseURL+"/api/v1/llm/config", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("set llm config: %d", resp.StatusCode)
+	}
+	var cfg LLMConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}

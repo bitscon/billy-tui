@@ -47,6 +47,11 @@ type model struct {
 	// UI overlays
 	showHelp bool
 
+	// model picker (':model' command)
+	modelPickerMode bool
+	modelOptions    []modelOption
+	modelPickerIdx  int
+
 	// spinner / response state
 	spinner      spinner.Model
 	thinking     bool
@@ -77,6 +82,23 @@ type model struct {
 type responseMsg struct{ text string }
 type errMsg struct{ text string }
 type healthResultMsg struct{ err error }
+
+// modelOption is one selectable provider/model entry in the ':model' picker.
+type modelOption struct {
+	provider string
+	model    string
+	label    string
+}
+
+type modelsLoadedMsg struct {
+	options []modelOption
+	err     error
+}
+type modelSetMsg struct {
+	provider string
+	model    string
+	err      error
+}
 
 type StreamChunkMsg struct {
 	Chunk  string

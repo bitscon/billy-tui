@@ -45,6 +45,8 @@ var helpContent = strings.TrimSpace(`
   :clear        Clear chat
   :export       Export conversation to ~/billy-chat-DATE.md
   :session new  Start a new session
+  :model        Pick a model (interactive)
+  :model P [M]  Switch to provider P (optional model M)
   :help         Show this screen
 `)
 
@@ -118,7 +120,7 @@ func (m model) View() string {
 			": " + m.commandInput.View(),
 		)
 		hintRow = HintBarStyle.Width(m.width).Render(
-			"enter execute  esc cancel  :clear  :export  :session new  :help",
+			"enter execute  esc cancel  :model  :clear  :export  :session new  :help",
 		)
 	} else {
 		focusIndicator := "─"
@@ -136,6 +138,27 @@ func (m model) View() string {
 	// ── governance alert border ───────────────────────────────────────────────
 	if m.governanceAlertTicks > 0 {
 		rendered = GovernanceBorderStyle.Render(rendered)
+	}
+
+	// ── model picker overlay ──────────────────────────────────────────────────
+	if m.modelPickerMode {
+		var b strings.Builder
+		b.WriteString(SectionHeaderStyle.Render("Select a model") + "\n")
+		b.WriteString(DimStyle.Render("↑/↓ move · enter switch · esc cancel") + "\n\n")
+		for i, opt := range m.modelOptions {
+			if i == m.modelPickerIdx {
+				b.WriteString(UserInputStyle.Render("▸ "+opt.label) + "\n")
+			} else {
+				b.WriteString("  " + opt.label + "\n")
+			}
+		}
+		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			overlay,
+			lipgloss.WithWhitespaceBackground(lipgloss.AdaptiveColor{Dark: "#111111", Light: "#DDDDDD"}),
+		)
 	}
 
 	// ── help overlay ─────────────────────────────────────────────────────────

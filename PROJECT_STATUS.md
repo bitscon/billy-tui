@@ -17,6 +17,8 @@ Git repository initialized for `bitscon/billy-tui`; initial scaffold commit reco
 - [Step 82] Repository initialized — local git history created; remote origin set to git@github.com:bitscon/billy-tui.git
 - [Streaming Parity Phase 3] Enter-key submit guard — blocks overlapping session submits while response is in progress
 - [Sidebar Redesign] Operator sidebar rebuilt against real endpoints (ADR-0125 Amendment 2026-06-20); replaces non-functional placeholder sections
+- [Model Switching] `:model` command (ADR-0125 Amendment 2026-06-20b) — interactive picker via GET /api/v1/llm/models; `:model <provider> [model]` switches via POST /api/v1/llm/config (sanctioned operator API); preserves base_url within a provider; sidebar reflects change live
 
 ## Next Steps
 - TBD (mission-progress section deferred until TUI tracks an active mission id)
+- Chat-driven model switching (Lever 1) pending operator decision to supersede the frozen conversational grammar (CONVERSATIONAL_RUNTIME_LLM_CONFIG_GRAMMAR_V1)

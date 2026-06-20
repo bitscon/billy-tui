@@ -67,13 +67,70 @@ func (m *model) renderResponse(text string) string {
 	return strings.TrimLeft(rendered, "\n")
 }
 
+// loadModels fetches available provider/models from the runtime and opens the picker.
+func loadModels(c *billyClient) tea.Cmd {
+	return func() tea.Msg {
+		providers, err := c.ListModels()
+		if err != nil {
+			return modelsLoadedMsg{err: err}
+		}
+		var opts []modelOption
+		for _, p := range providers {
+			if p.DefaultModel != "" {
+				opts = append(opts, modelOption{
+					provider: p.ID, model: p.DefaultModel,
+					label: p.ID + " · " + p.DefaultModel + "  (default)",
+				})
+			}
+			for _, mdl := range p.Models {
+				if mdl == p.DefaultModel {
+					continue
+				}
+				opts = append(opts, modelOption{provider: p.ID, model: mdl, label: p.ID + " · " + mdl})
+			}
+		}
+		return modelsLoadedMsg{options: opts}
+	}
+}
+
+// setModel switches the active model via the sanctioned operator API. When
+// switching within the same provider it preserves the operator's current
+// base_url, so a custom host (e.g. a remote ollama) is not reset to the
+// provider default.
+func setModel(c *billyClient, provider, model string) tea.Cmd {
+	return func() tea.Msg {
+		baseURL := ""
+		if cur, err := c.LLMConfig(); err == nil && cur.Provider == provider {
+			baseURL = cur.BaseURL
+		}
+		cfg, err := c.SetLLMConfig(provider, model, baseURL)
+		if err != nil {
+			return modelSetMsg{provider: provider, model: model, err: err}
+		}
+		return modelSetMsg{provider: cfg.Provider, model: cfg.Model}
+	}
+}
+
 // execCommand handles the command palette. cmd arrives without the leading ":".
-func (m *model) execCommand(raw string) {
+func (m *model) execCommand(raw string) tea.Cmd {
 	parts := strings.Fields(strings.TrimSpace(raw))
 	if len(parts) == 0 {
-		return
+		return nil
 	}
 	switch parts[0] {
+	case "model", "m":
+		if len(parts) == 1 {
+			return loadModels(m.client) // no arg → open picker
+		}
+		// :model <provider> [model]
+		provider := parts[1]
+		model := ""
+		if len(parts) > 2 {
+			model = strings.Join(parts[2:], " ")
+		}
+		m.saveStatus = "Switching…"
+		m.saveStatusTicks = 4
+		return setModel(m.client, provider, model)
 	case "clear", "c":
 		m.messages = []string{}
 		m.displayMessages = []string{}
@@ -101,6 +158,7 @@ func (m *model) execCommand(raw string) {
 	case "help", "h":
 		m.showHelp = true
 	}
+	return nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -164,6 +222,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.displayMessages = append(m.displayMessages, ErrorStyle.Render(plain))
 			m.updateChatViewport()
 		}
+		return m, nil
+
+	// ── model picker: list loaded ─────────────────────────────────────────────
+	case modelsLoadedMsg:
+		if msg.err != nil {
+			m.saveStatus = "⚠️  models: " + msg.err.Error()
+			m.saveStatusTicks = 4
+			return m, nil
+		}
+		if len(msg.options) == 0 {
+			m.saveStatus = "No models offered by runtime"
+			m.saveStatusTicks = 4
+			return m, nil
+		}
+		m.modelOptions = msg.options
+		m.modelPickerIdx = 0
+		m.modelPickerMode = true
+		return m, nil
+
+	// ── model switch result ───────────────────────────────────────────────────
+	case modelSetMsg:
+		if msg.err != nil {
+			m.saveStatus = "⚠️  switch failed: " + msg.err.Error()
+		} else {
+			m.saveStatus = "✓ Switched to " + msg.model + " (" + msg.provider + ")"
+			m.sidebar.model = msg.model
+			m.sidebar.provider = msg.provider
+		}
+		m.saveStatusTicks = 4
 		return m, nil
 
 	// ── non-streaming response ────────────────────────────────────────────────
@@ -303,6 +390,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── keyboard ─────────────────────────────────────────────────────────────
 	case tea.KeyMsg:
+		// ── model picker: navigate / select / cancel ──
+		if m.modelPickerMode {
+			switch msg.String() {
+			case "up", "k":
+				if m.modelPickerIdx > 0 {
+					m.modelPickerIdx--
+				}
+			case "down", "j":
+				if m.modelPickerIdx < len(m.modelOptions)-1 {
+					m.modelPickerIdx++
+				}
+			case "enter":
+				opt := m.modelOptions[m.modelPickerIdx]
+				m.modelPickerMode = false
+				m.saveStatus = "Switching to " + opt.model + "…"
+				m.saveStatusTicks = 4
+				return m, setModel(m.client, opt.provider, opt.model)
+			case "esc", "ctrl+c":
+				m.modelPickerMode = false
+			}
+			return m, nil
+		}
+
 		// ── help overlay: any key closes ──
 		if m.showHelp {
 			m.showHelp = false
@@ -313,9 +423,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.commandMode {
 			switch msg.String() {
 			case "enter":
-				m.execCommand(m.commandInput.Value())
+				execCmd := m.execCommand(m.commandInput.Value())
 				m.commandMode = false
 				m.commandInput.Reset()
+				return m, execCmd
 			case "esc", "ctrl+c":
 				m.commandMode = false
 				m.commandInput.Reset()
