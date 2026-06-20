@@ -157,6 +157,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── health check ─────────────────────────────────────────────────────────
 	case healthResultMsg:
+		m.sidebar.connected = msg.err == nil
 		if msg.err != nil {
 			plain := "⚠️  Cannot reach Billy at " + m.client.baseURL + ". Is billy-runtime running?"
 			m.messages = append(m.messages, plain)
@@ -173,6 +174,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		m.liveMsg = ""
 		m.lastLatency = time.Since(m.requestStarted)
+		m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
+		m.sidebar.lastTokens = len(msg.text) / 4
 		m.updateChatViewport()
 		return m, nil
 
@@ -208,6 +211,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isStreaming = false
 		m.thinking = false
 		m.lastLatency = time.Since(m.requestStarted)
+		m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
+		if m.streamTokens > 0 {
+			m.sidebar.lastTokens = m.streamTokens
+		}
 		m.updateChatViewport()
 		return m, nil
 
@@ -227,47 +234,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── sidebar polling ──────────────────────────────────────────────────────
 	case sidebarTickMsg:
-		if status, err := m.client.RuntimeStatus(); err == nil {
-			parts := []string{}
-			for _, k := range []string{"model", "mode", "version"} {
-				if v, ok := status[k]; ok && v != "" {
-					parts = append(parts, v)
-				}
+		m.sidebar.sessionID = m.client.sessionID
+
+		// Runtime + governance counters (one call serves both sections).
+		if st, err := m.client.RuntimeStatus(); err == nil {
+			m.sidebar.connected = true
+			m.sidebar.runtimeOK = true
+			m.sidebar.lifecycleState = st.LifecycleState
+			m.sidebar.runtimePhase = st.RuntimePhase
+			m.sidebar.currentStage = st.CurrentStage
+			m.sidebar.targetStage = st.TargetStage
+			m.sidebar.executionEnabled = st.ExecutionEnabled
+
+			m.sidebar.govReady = true
+			m.sidebar.govAllowed = st.Telemetry.Allowed
+			m.sidebar.govRejected = st.Telemetry.Rejected
+
+			// Governance border pulse when a new rejection lands.
+			if st.Telemetry.Rejected > m.lastGovRejected {
+				m.governanceAlertTicks = 3
+				plain := "[Billy] 🛡 Action blocked by governance policy."
+				m.messages = append(m.messages, plain)
+				m.displayMessages = append(m.displayMessages, ErrorStyle.Render(plain))
+				m.updateChatViewport()
 			}
-			if len(parts) > 0 {
-				m.sidebar.runtimeStatus = strings.Join(parts, " │ ")
-			}
-			m.sidebar.model = status["model"]
-			m.sidebar.mode = status["mode"]
+			m.lastGovRejected = st.Telemetry.Rejected
+		} else {
+			m.sidebar.connected = false
+			m.sidebar.runtimeOK = false
 		}
-		if events, err := m.client.TelemetryEvents(); err == nil {
-			types := []string{}
-			for _, e := range events {
-				if t, ok := e["event_type"].(string); ok {
-					types = append(types, t)
+
+		// LLM provider/model.
+		if cfg, err := m.client.LLMConfig(); err == nil {
+			m.sidebar.provider = cfg.Provider
+			m.sidebar.model = cfg.Model
+		}
+
+		// Latest governance denial reason code (most recent by timestamp).
+		if recent, err := m.client.ReconciliationRecent(20); err == nil {
+			m.sidebar.govReady = true
+			var latest GuidanceDecision
+			for _, d := range recent {
+				if d.Timestamp >= latest.Timestamp {
+					latest = d
 				}
 			}
-			if len(types) > 5 {
-				types = types[len(types)-5:]
-			}
-			m.sidebar.recentEvents = types
-			for _, t := range types {
-				if t == "tool.call.denied" && t != m.lastGovernanceEvent {
-					m.lastGovernanceEvent = t
-					m.governanceAlertTicks = 3
-					m.sidebar.governanceState = "🚫 action blocked"
-					plain := "[Billy] 🛡️ Action blocked by governance policy."
-					m.messages = append(m.messages, plain)
-					m.displayMessages = append(m.displayMessages, ErrorStyle.Render(plain))
-					m.updateChatViewport()
-				}
+			if latest.ReasonCode != "" {
+				m.sidebar.lastDenialCode = latest.ReasonCode
 			}
 		}
+
+		// Live work progress: active execution jobs (I125).
+		if jobs, err := m.client.ActiveJobs(); err == nil {
+			m.sidebar.jobsReady = true
+			m.sidebar.activeJobs = jobs
+		}
+
 		if m.governanceAlertTicks > 0 {
 			m.governanceAlertTicks--
-			if m.governanceAlertTicks == 0 {
-				m.sidebar.governanceState = ""
-			}
 		}
 		if m.saveStatusTicks > 0 {
 			m.saveStatusTicks--

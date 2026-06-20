@@ -164,28 +164,93 @@ func nextStreamMessage(events <-chan streamEvent, prompt string) tea.Msg {
 	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, events: events}
 }
 
-func (c *billyClient) RuntimeStatus() (map[string]string, error) {
-	resp, err := c.http.Get(c.baseURL + "/runtime/status")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var result map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-	return result, nil
+// ── sidebar data types (mirror billy-runtime response models) ────────────────
+
+// RuntimeStatus mirrors RuntimeStatusResponse — a nested object, not a flat map.
+type RuntimeStatus struct {
+	Service          string `json:"service"`
+	RuntimePhase     int    `json:"runtime_phase"`
+	LifecycleState   string `json:"lifecycle_state"`
+	ExecutionEnabled bool   `json:"execution_enabled"`
+	RuntimeContract  string `json:"runtime_contract"`
+	CurrentStage     string `json:"current_stage"`
+	TargetStage      string `json:"target_stage"`
+	Telemetry        struct {
+		Total    int `json:"total"`
+		Allowed  int `json:"allowed"`
+		Rejected int `json:"rejected"`
+		Skipped  int `json:"skipped"`
+	} `json:"telemetry"`
 }
 
-func (c *billyClient) TelemetryEvents() ([]map[string]interface{}, error) {
-	resp, err := c.http.Get(c.baseURL + "/telemetry/events")
+// LLMConfig mirrors GET /api/v1/llm/config.
+type LLMConfig struct {
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	BaseURL    string `json:"base_url"`
+	Configured bool   `json:"configured"`
+}
+
+// GuidanceDecision is one entry from GET /reconciliation/recent.
+type GuidanceDecision struct {
+	ArtifactID   string  `json:"artifact_id"`
+	ArtifactType string  `json:"artifact_type"`
+	ReasonCode   string  `json:"reason_code"`
+	Action       string  `json:"action"`
+	Timestamp    float64 `json:"timestamp"`
+}
+
+// ActiveJob is one item from GET /api/v1/execution/jobs/active.
+type ActiveJob struct {
+	ExecutionJobID string `json:"execution_job_id"`
+	CurrentState   string `json:"current_state"`
+	CapabilityID   string `json:"capability_id"`
+	ExecutorID     string `json:"executor_id"`
+}
+
+// getJSON performs a GET against the runtime and decodes the body into dest.
+func (c *billyClient) getJSON(path string, dest interface{}) error {
+	resp, err := c.http.Get(c.baseURL + path)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
-	var result []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("GET %s: %d", path, resp.StatusCode)
+	}
+	return json.NewDecoder(resp.Body).Decode(dest)
+}
+
+func (c *billyClient) RuntimeStatus() (*RuntimeStatus, error) {
+	var s RuntimeStatus
+	if err := c.getJSON("/runtime/status", &s); err != nil {
 		return nil, err
 	}
-	return result, nil
+	return &s, nil
+}
+
+func (c *billyClient) LLMConfig() (*LLMConfig, error) {
+	var cfg LLMConfig
+	if err := c.getJSON("/api/v1/llm/config", &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func (c *billyClient) ReconciliationRecent(limit int) ([]GuidanceDecision, error) {
+	var out []GuidanceDecision
+	if err := c.getJSON(fmt.Sprintf("/reconciliation/recent?limit=%d", limit), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *billyClient) ActiveJobs() ([]ActiveJob, error) {
+	var payload struct {
+		Items []ActiveJob `json:"items"`
+	}
+	if err := c.getJSON("/api/v1/execution/jobs/active", &payload); err != nil {
+		return nil, err
+	}
+	return payload.Items, nil
 }

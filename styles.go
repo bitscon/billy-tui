@@ -111,10 +111,17 @@ var SectionHeaderStyle = lipgloss.NewStyle().
 	Bold(true).
 	Foreground(colorText)
 
+// sidebar status indicators
+var (
+	SidebarOKStyle   = lipgloss.NewStyle().Foreground(colorDiffAdd)
+	SidebarBadStyle  = lipgloss.NewStyle().Foreground(colorError)
+	SidebarWarnStyle = lipgloss.NewStyle().Foreground(colorWarning)
+	SidebarKeyStyle  = lipgloss.NewStyle().Foreground(colorSubtle)
+)
+
 // suppress unused colour warnings for palette entries not yet wired to styles
 var (
 	_ = colorBackground
-	_ = colorDiffAdd
 	_ = colorDiffRemove
 	_ = colorDim
 )

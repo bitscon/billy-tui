@@ -62,8 +62,8 @@ func (m model) View() string {
 	if m.sidebar.model != "" {
 		base += " │ " + m.sidebar.model
 	}
-	if m.sidebar.mode != "" {
-		base += " │ " + m.sidebar.mode
+	if m.sidebar.provider != "" {
+		base += " │ " + m.sidebar.provider
 	}
 	statusParts = append(statusParts, StatusBarStyle.Render(base))
 

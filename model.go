@@ -62,7 +62,7 @@ type model struct {
 	client               *billyClient
 	sidebar              sidebarState
 	governanceAlertTicks int
-	lastGovernanceEvent  string
+	lastGovRejected      int
 
 	// notifications
 	saveStatus      string
