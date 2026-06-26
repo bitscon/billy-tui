@@ -18,7 +18,12 @@ func saveChat(messages []string, sessionID string) (string, error) {
 
 	latestPath := filepath.Join(homeDir, "billy-chat-debug-latest.md")
 
-	debugDir := filepath.Join("/home/billyb/workspaces/billy-tui", "debug")
+	// Archive copies default to ~/.billy/debug (override with BILLY_DEBUG_DIR) —
+	// never inside a source tree, where they would clutter / risk being committed.
+	debugDir := os.Getenv("BILLY_DEBUG_DIR")
+	if debugDir == "" {
+		debugDir = filepath.Join(homeDir, ".billy", "debug")
+	}
 	if err := os.MkdirAll(debugDir, 0755); err != nil {
 		return "", fmt.Errorf("cannot create debug dir: %w", err)
 	}

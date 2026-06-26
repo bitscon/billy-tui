@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -34,7 +35,7 @@ type model struct {
 	// input — textarea supports programmatic SetValue() for future voice injection
 	input      textarea.Model
 	draftInput string // saved when navigating history
-	voiceReady bool   // stub: true when audio device is available (Phase 4)
+	lastPrompt string // last submitted prompt, restored to the input if the turn fails
 
 	// input history ring buffer (max 50)
 	inputHistory []string
@@ -59,6 +60,13 @@ type model struct {
 	streamBuffer string
 	streamTokens int
 
+	// in-flight turn control. streamGen tags every turn; messages from a turn
+	// whose Gen != streamGen are stale (a newer turn started, or this one was
+	// cancelled) and are ignored. streamCancel cancels the in-flight request's
+	// context (esc / abandon, or release on completion).
+	streamGen    int
+	streamCancel context.CancelFunc
+
 	// timing
 	requestStarted time.Time
 	lastLatency    time.Duration
@@ -79,13 +87,19 @@ type model struct {
 
 // --- message types ---
 
-type responseMsg struct{ text string }
-type errMsg struct{ text string }
+type responseMsg struct {
+	text string
+	Gen  int
+}
+type errMsg struct {
+	text string
+	Gen  int
+}
 
 // turnInProgressMsg signals that billy-runtime returned HTTP 409
 // (session_turn_in_progress): Billy is still working on the previous turn.
 // It is surfaced as a transient, non-alarming status, never as an error.
-type turnInProgressMsg struct{}
+type turnInProgressMsg struct{ Gen int }
 
 type healthResultMsg struct{ err error }
 
@@ -109,12 +123,17 @@ type modelSetMsg struct {
 type StreamChunkMsg struct {
 	Chunk  string
 	Prompt string
+	Gen    int
 	events <-chan streamEvent
 }
-type StreamDoneMsg struct{ FullText string }
+type StreamDoneMsg struct {
+	FullText string
+	Gen      int
+}
 type StreamErrMsg struct {
 	Prompt string
 	Err    error
+	Gen    int
 }
 
 // --- constructors ---

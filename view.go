@@ -30,6 +30,7 @@ var helpContent = strings.TrimSpace(`
   Keys
   ────────────────────────────────
   enter         Send message
+  esc           Abandon the reply Billy is generating
   ↑ / ↓         Cycle input history
   tab           Toggle scroll / input focus
   page up/dn    Scroll chat
@@ -53,6 +54,15 @@ var helpContent = strings.TrimSpace(`
 func (m model) View() string {
 	if !m.ready {
 		return "Initialising…\n"
+	}
+
+	// Guard against terminals too small to lay out the two-pane UI.
+	if m.width < 60 || m.height < 8 {
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			DimStyle.Render("Terminal too narrow\nresize to at least 60×8"),
+		)
 	}
 
 	chatWidth := (m.width * 7) / 10

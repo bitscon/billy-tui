@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,9 +15,18 @@ import (
 
 type sidebarTickMsg struct{}
 
-func waitForStream(events <-chan streamEvent, prompt string) tea.Cmd {
+func waitForStream(events <-chan streamEvent, prompt string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		return nextStreamMessage(events, prompt)
+		return nextStreamMessage(events, prompt, gen)
+	}
+}
+
+// releaseStream cancels and clears the in-flight turn's context, freeing its
+// resources. Safe to call when no turn is active.
+func (m *model) releaseStream() {
+	if m.streamCancel != nil {
+		m.streamCancel()
+		m.streamCancel = nil
 	}
 }
 
@@ -66,6 +76,39 @@ func (m *model) renderResponse(text string) string {
 		rendered = renderMarkdown(text, m.chatViewport.Width)
 	}
 	return strings.TrimLeft(rendered, "\n")
+}
+
+// rebuildDisplayMessages re-derives the styled transcript from the raw messages
+// using the current renderer width. Called on terminal resize so Billy's
+// markdown re-wraps to the new width instead of keeping stale line breaks. The
+// styling rules mirror how each line is rendered when first appended.
+func (m *model) rebuildDisplayMessages() {
+	if len(m.messages) == 0 {
+		return // keep the startup dim hint
+	}
+	rebuilt := make([]string, 0, len(m.messages))
+	for _, raw := range m.messages {
+		switch {
+		case strings.HasPrefix(raw, "[You] "):
+			rebuilt = append(rebuilt, UserInputStyle.Render(raw))
+		case strings.HasPrefix(raw, "[Billy] 🛡"):
+			rebuilt = append(rebuilt, ErrorStyle.Render(raw))
+		case strings.HasPrefix(raw, "[Billy] "):
+			rebuilt = append(rebuilt, BillyResponseStyle.Render("[Billy] ")+m.renderResponse(strings.TrimPrefix(raw, "[Billy] ")))
+		default:
+			rebuilt = append(rebuilt, ErrorStyle.Render(raw))
+		}
+	}
+	m.displayMessages = rebuilt
+}
+
+// restoreFailedPrompt puts the last submitted prompt back into the input after a
+// turn fails, so the operator can resend without retyping. It does not clobber
+// anything the operator has since typed.
+func (m *model) restoreFailedPrompt() {
+	if m.lastPrompt != "" && m.input.Value() == "" {
+		m.input.SetValue(m.lastPrompt)
+	}
 }
 
 // loadModels fetches available provider/models from the runtime and opens the picker.
@@ -165,14 +208,16 @@ func (m *model) execCommand(raw string) tea.Cmd {
 // handleTurnInProgress resolves an HTTP 409 (session_turn_in_progress) from the
 // runtime. Billy is still finishing the previous turn, so the just-attempted
 // request is dropped rather than retried (a retry would 409 again). The in-flight
-// UI state is cleared and a transient, non-alarming status line is shown. The
-// operator's input is preserved by the submit guard, so they can simply resend
-// once Billy responds.
+// UI state is cleared, the just-typed prompt is restored to the input so the
+// operator can resend once Billy responds, and a transient, non-alarming status
+// line is shown.
 func (m *model) handleTurnInProgress() (tea.Model, tea.Cmd) {
+	m.releaseStream()
 	m.thinking = false
 	m.isStreaming = false
 	m.liveMsg = ""
 	m.streamBuffer = ""
+	m.restoreFailedPrompt()
 	m.saveStatus = turnInProgressMessage
 	m.saveStatusTicks = 4
 	m.updateChatViewport()
@@ -184,8 +229,11 @@ func (m model) Init() tea.Cmd {
 		err := m.client.Health()
 		return healthResultMsg{err: err}
 	}
+	// Populate the sidebar immediately on launch rather than waiting for the
+	// first 5s tick, so model/provider/status are not blank at startup.
+	sidebarNow := func() tea.Msg { return sidebarTickMsg{} }
 	sidebarTick := tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return sidebarTickMsg{} })
-	return tea.Batch(textarea.Blink, m.spinner.Tick, healthCmd, sidebarTick)
+	return tea.Batch(textarea.Blink, m.spinner.Tick, healthCmd, sidebarNow, sidebarTick)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -198,7 +246,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		chatWidth := (msg.Width * 7) / 10
+		if chatWidth < 24 {
+			chatWidth = 24 // floor so the renderer/viewport never degenerate
+		}
 		m.sidebarWidth = msg.Width - chatWidth
+		if m.sidebarWidth < 0 {
+			m.sidebarWidth = 0
+		}
 
 		// Reserve 2 lines below panes: 1 for textarea row, 1 for hint/command bar.
 		// Panes: Height() sets inner height; border adds 2 more → paneOuter = inner+2.
@@ -208,6 +262,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if vpHeight < 4 {
 			vpHeight = 4
 		}
+		mdWidth := chatWidth - 4
+		if mdWidth < 20 {
+			mdWidth = 20
+		}
+		m.mdRenderer = newMdRenderer(mdWidth)
 		if !m.ready {
 			m.chatViewport = viewport.New(chatWidth, vpHeight)
 			m.chatViewport.SetContent(strings.Join(m.displayMessages, "\n"))
@@ -216,9 +275,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.chatViewport.Width = chatWidth
 			m.chatViewport.Height = vpHeight
+			// Re-flow existing messages to the new width (mdRenderer is already
+			// updated above) so long replies don't keep stale line breaks.
+			m.rebuildDisplayMessages()
+			m.updateChatViewport()
 		}
 		m.input.SetWidth(msg.Width - 4)
-		m.mdRenderer = newMdRenderer(chatWidth - 4)
 		return m, nil
 
 	// ── spinner ──────────────────────────────────────────────────────────────
@@ -273,6 +335,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// ── non-streaming response ────────────────────────────────────────────────
 	case responseMsg:
+		if msg.Gen != m.streamGen {
+			return m, nil // stale: a newer turn started or this one was abandoned
+		}
+		m.releaseStream()
 		rendered := m.renderResponse(msg.text)
 		m.messages = append(m.messages, "[Billy] "+msg.text)
 		m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
@@ -285,16 +351,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
+		if msg.Gen != m.streamGen {
+			return m, nil
+		}
+		m.releaseStream()
 		m.messages = append(m.messages, msg.text)
 		m.displayMessages = append(m.displayMessages, ErrorStyle.Render(msg.text))
 		m.thinking = false
 		m.isStreaming = false
 		m.liveMsg = ""
+		m.restoreFailedPrompt()
 		m.updateChatViewport()
 		return m, nil
 
 	// ── streaming ────────────────────────────────────────────────────────────
 	case StreamChunkMsg:
+		if msg.Gen != m.streamGen {
+			return m, nil // stale chunk from an abandoned/superseded turn
+		}
 		if msg.Chunk != "" {
 			m.appendStreamChunk(msg.Chunk)
 			m.liveMsg = BillyResponseStyle.Render("[Billy] ") +
@@ -303,9 +377,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isStreaming = true
 		m.thinking = false
 		m.updateChatViewport()
-		return m, waitForStream(msg.events, msg.Prompt)
+		return m, waitForStream(msg.events, msg.Prompt, msg.Gen)
 
 	case StreamDoneMsg:
+		if msg.Gen != m.streamGen {
+			return m, nil
+		}
+		m.releaseStream()
 		if msg.FullText != "" {
 			rendered := m.renderResponse(msg.FullText)
 			m.messages = append(m.messages, "[Billy] "+msg.FullText)
@@ -324,6 +402,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case StreamErrMsg:
+		if msg.Gen != m.streamGen {
+			return m, nil // stale: turn was abandoned (esc) or superseded
+		}
+		m.releaseStream()
 		m.streamBuffer = ""
 		m.isStreaming = false
 		m.liveMsg = ""
@@ -337,13 +419,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinking = false
 			m.messages = append(m.messages, "⚠️  streaming error")
 			m.displayMessages = append(m.displayMessages, ErrorStyle.Render("⚠️  streaming error"))
+			m.restoreFailedPrompt()
 			m.updateChatViewport()
 			return m, nil
 		}
-		return m, ask(msg.Prompt, m.client.sessionID, m.client.baseURL)
+		// /ask/stream failed for another reason — fall back to the blocking
+		// /ask path, keeping the same generation so its result stays current.
+		return m, ask(m.client, msg.Prompt, msg.Gen)
 
 	// ── 409 turn-in-progress (non-streaming path) ─────────────────────────────
 	case turnInProgressMsg:
+		if msg.Gen != m.streamGen {
+			return m, nil
+		}
 		return m.handleTurnInProgress()
 
 	// ── sidebar polling ──────────────────────────────────────────────────────
@@ -465,6 +553,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// ── abandon an in-flight turn (esc) ──
+		// Only intercepts esc while a turn is running; otherwise esc falls through
+		// to its normal chat-pane behavior. Cancels the request context (frees the
+		// stream goroutine) and bumps the generation so any late messages from the
+		// abandoned turn are ignored. The runtime's one-turn guard means Billy may
+		// keep working server-side, so a quick resend can hit a (handled) 409.
+		if msg.String() == "esc" && (m.thinking || m.isStreaming) {
+			m.releaseStream()
+			m.streamGen++
+			m.thinking = false
+			m.isStreaming = false
+			m.liveMsg = ""
+			m.streamBuffer = ""
+			m.restoreFailedPrompt()
+			m.saveStatus = "Abandoned — Billy may still be finishing server-side."
+			m.saveStatusTicks = 4
+			m.updateChatViewport()
+			return m, nil
+		}
+
 		// ── global shortcuts (work in any pane) ──
 		switch msg.String() {
 		case "ctrl+c":
@@ -541,14 +649,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, "[You] "+userMsg)
 				m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+userMsg))
 				m.input.Reset()
+				m.lastPrompt = userMsg
+				// New turn: bump the generation and open a cancelable, generously
+				// bounded context. thinking=true with isStreaming=false lets the
+				// animated "Billy is thinking…" spinner show until the first chunk
+				// arrives (StreamChunkMsg flips isStreaming on).
+				m.releaseStream()
+				m.streamGen++
+				gen := m.streamGen
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+				m.streamCancel = cancel
 				m.thinking = true
-				m.isStreaming = true
+				m.isStreaming = false
 				m.streamBuffer = ""
 				m.streamTokens = 0
 				m.requestStarted = time.Now()
-				m.liveMsg = BillyResponseStyle.Render("[Billy] ") + " █"
+				m.liveMsg = ""
 				m.updateChatViewport()
-				return m, askStream(userMsg, m.client.sessionID, m.client.baseURL)
+				return m, askStream(ctx, m.client, userMsg, gen)
 
 			case "up":
 				if len(m.inputHistory) == 0 {

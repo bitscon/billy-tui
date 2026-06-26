@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,9 +57,10 @@ func is409TurnInProgress(resp *http.Response) bool {
 }
 
 type billyClient struct {
-	baseURL   string
-	sessionID string
-	http      *http.Client
+	baseURL    string
+	sessionID  string
+	http       *http.Client
+	streamHTTP *http.Client
 }
 
 type streamEvent struct {
@@ -73,6 +75,10 @@ func newBillyClient(baseURL string) *billyClient {
 		baseURL:   baseURL,
 		sessionID: fmt.Sprintf("tui-%d", time.Now().UnixNano()),
 		http:      &http.Client{Timeout: 30 * time.Second},
+		// Streaming carries no total deadline: a slow local model (e.g. qwen)
+		// can take minutes per turn. The per-turn context (see askStream) bounds
+		// it with a generous ceiling and provides the cancel handle for `esc`.
+		streamHTTP: &http.Client{},
 	}
 }
 
@@ -88,17 +94,14 @@ func (c *billyClient) Health() error {
 	return nil
 }
 
-func (c *billyClient) Ask(prompt string) (string, error) {
-	return requestAsk(prompt, c.sessionID, c.baseURL)
-}
-
-func requestAsk(prompt string, sessionID string, baseURL string) (string, error) {
+// doAsk performs a blocking (non-streaming) turn against /ask using the pooled
+// client. Used as the fallback when /ask/stream is unavailable.
+func (c *billyClient) doAsk(prompt string) (string, error) {
 	body, _ := json.Marshal(map[string]string{
 		"prompt":     prompt,
-		"session_id": sessionID,
+		"session_id": c.sessionID,
 	})
-	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Post(baseURL+"/ask", "application/json", bytes.NewReader(body))
+	resp, err := c.http.Post(c.baseURL+"/ask", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -118,36 +121,40 @@ func requestAsk(prompt string, sessionID string, baseURL string) (string, error)
 	return result.Message, nil
 }
 
-func ask(prompt string, sessionID string, baseURL string) tea.Cmd {
+func ask(c *billyClient, prompt string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		message, err := requestAsk(prompt, sessionID, baseURL)
+		message, err := c.doAsk(prompt)
 		if err != nil {
 			if errors.Is(err, errTurnInProgress) {
-				return turnInProgressMsg{}
+				return turnInProgressMsg{Gen: gen}
 			}
-			return errMsg{text: "⚠️  " + err.Error()}
+			return errMsg{text: "⚠️  " + err.Error(), Gen: gen}
 		}
-		return responseMsg{text: message}
+		return responseMsg{text: message, Gen: gen}
 	}
 }
 
-func askStream(prompt string, sessionID string, baseURL string) tea.Cmd {
+func askStream(ctx context.Context, c *billyClient, prompt string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		events, err := openAskStream(prompt, sessionID, baseURL)
+		events, err := c.openAskStream(ctx, prompt)
 		if err != nil {
-			return StreamErrMsg{Prompt: prompt, Err: err}
+			return StreamErrMsg{Prompt: prompt, Err: err, Gen: gen}
 		}
-		return nextStreamMessage(events, prompt)
+		return nextStreamMessage(events, prompt, gen)
 	}
 }
 
-func openAskStream(prompt string, sessionID string, baseURL string) (<-chan streamEvent, error) {
+func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan streamEvent, error) {
 	body, _ := json.Marshal(map[string]string{
 		"prompt":     prompt,
-		"session_id": sessionID,
+		"session_id": c.sessionID,
 	})
-	httpClient := &http.Client{Timeout: 60 * time.Second}
-	resp, err := httpClient.Post(baseURL+"/ask/stream", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/ask/stream", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.streamHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -203,18 +210,18 @@ func openAskStream(prompt string, sessionID string, baseURL string) (<-chan stre
 	return events, nil
 }
 
-func nextStreamMessage(events <-chan streamEvent, prompt string) tea.Msg {
+func nextStreamMessage(events <-chan streamEvent, prompt string, gen int) tea.Msg {
 	event, ok := <-events
 	if !ok {
-		return StreamDoneMsg{FullText: ""}
+		return StreamDoneMsg{FullText: "", Gen: gen}
 	}
 	if event.Err != nil {
-		return StreamErrMsg{Prompt: prompt, Err: event.Err}
+		return StreamErrMsg{Prompt: prompt, Err: event.Err, Gen: gen}
 	}
 	if event.Done {
-		return StreamDoneMsg{FullText: event.FullText}
+		return StreamDoneMsg{FullText: event.FullText, Gen: gen}
 	}
-	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, events: events}
+	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, Gen: gen, events: events}
 }
 
 // ── sidebar data types (mirror billy-runtime response models) ────────────────
