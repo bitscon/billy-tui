@@ -146,11 +146,17 @@ func initialModel(client *billyClient) model {
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 
 	return model{
-		messages: []string{
-			"[Billy] Hey. What can I build for you?",
-		},
+		// Start with an empty transcript. The TUI must never speak AS Billy:
+		// the first "[Billy]" line in the transcript is Billy's real response
+		// from the runtime. `messages` (used for export / debug-save) stays
+		// empty so persisted transcripts contain only real conversation.
+		messages: []string{},
+		// `displayMessages` carries a single dim, non-attributed UI hint so the
+		// chat pane is not blank at startup. It is clearly the interface, not
+		// Billy (DimStyle, no "[Billy]" prefix), and is overwritten as soon as
+		// the first real message arrives.
 		displayMessages: []string{
-			BillyResponseStyle.Render("[Billy] ") + "Hey. What can I build for you?",
+			DimStyle.Render("— Say hi to start. —"),
 		},
 		input:        ti,
 		commandInput: ci,

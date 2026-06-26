@@ -531,6 +531,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyIdx = -1
 				m.draftInput = ""
 
+				// Clear the startup UI hint (a non-Billy "— Say hi to start. —"
+				// line lives only in displayMessages while messages is empty)
+				// the moment the real conversation begins.
+				if len(m.messages) == 0 {
+					m.displayMessages = nil
+				}
+
 				m.messages = append(m.messages, "[You] "+userMsg)
 				m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+userMsg))
 				m.input.Reset()
