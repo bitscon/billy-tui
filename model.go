@@ -81,6 +81,12 @@ type model struct {
 
 type responseMsg struct{ text string }
 type errMsg struct{ text string }
+
+// turnInProgressMsg signals that billy-runtime returned HTTP 409
+// (session_turn_in_progress): Billy is still working on the previous turn.
+// It is surfaced as a transient, non-alarming status, never as an error.
+type turnInProgressMsg struct{}
+
 type healthResultMsg struct{ err error }
 
 // modelOption is one selectable provider/model entry in the ':model' picker.

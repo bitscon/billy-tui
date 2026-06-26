@@ -4,13 +4,56 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// errTurnInProgress is returned when billy-runtime rejects a request with
+// HTTP 409 / code "session_turn_in_progress" — the correct one-turn-at-a-time
+// guard. It is a benign, transient condition (Billy is still working on the
+// previous turn), not a hard failure, so callers surface a friendly state
+// rather than an alarming error.
+var errTurnInProgress = errors.New("session_turn_in_progress")
+
+// turnInProgressMessage is the friendly, non-alarming line shown to the operator
+// when a 409 turn-in-progress is hit.
+const turnInProgressMessage = "⏳ Billy is still thinking — give him a moment…"
+
+// is409TurnInProgress reports whether a non-200 response is the runtime's
+// one-turn-at-a-time guard. A 409 alone is treated as turn-in-progress; if a
+// JSON body is present it must carry code "session_turn_in_progress" to qualify,
+// so unrelated 409s (should any exist) are not misclassified.
+func is409TurnInProgress(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusConflict {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil || len(bytes.TrimSpace(raw)) == 0 {
+		// No readable body — a bare 409 from /ask is the turn guard.
+		return true
+	}
+	var payload struct {
+		Code   string `json:"code"`
+		Detail struct {
+			Code string `json:"code"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		// Non-JSON 409 body: still a conflict on a single-turn endpoint.
+		return true
+	}
+	if payload.Code == "session_turn_in_progress" || payload.Detail.Code == "session_turn_in_progress" {
+		return true
+	}
+	// A 409 with a different code is not our turn guard.
+	return payload.Code == "" && payload.Detail.Code == ""
+}
 
 type billyClient struct {
 	baseURL   string
@@ -61,6 +104,9 @@ func requestAsk(prompt string, sessionID string, baseURL string) (string, error)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if is409TurnInProgress(resp) {
+			return "", errTurnInProgress
+		}
 		return "", fmt.Errorf("ask request failed: %d", resp.StatusCode)
 	}
 	var result struct {
@@ -76,6 +122,9 @@ func ask(prompt string, sessionID string, baseURL string) tea.Cmd {
 	return func() tea.Msg {
 		message, err := requestAsk(prompt, sessionID, baseURL)
 		if err != nil {
+			if errors.Is(err, errTurnInProgress) {
+				return turnInProgressMsg{}
+			}
 			return errMsg{text: "⚠️  " + err.Error()}
 		}
 		return responseMsg{text: message}
@@ -103,7 +152,11 @@ func openAskStream(prompt string, sessionID string, baseURL string) (<-chan stre
 		return nil, err
 	}
 	if resp.StatusCode != 200 {
+		turnInProgress := is409TurnInProgress(resp)
 		resp.Body.Close()
+		if turnInProgress {
+			return nil, errTurnInProgress
+		}
 		return nil, fmt.Errorf("stream request failed: %d", resp.StatusCode)
 	}
 

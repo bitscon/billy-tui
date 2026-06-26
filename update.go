@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -161,6 +162,23 @@ func (m *model) execCommand(raw string) tea.Cmd {
 	return nil
 }
 
+// handleTurnInProgress resolves an HTTP 409 (session_turn_in_progress) from the
+// runtime. Billy is still finishing the previous turn, so the just-attempted
+// request is dropped rather than retried (a retry would 409 again). The in-flight
+// UI state is cleared and a transient, non-alarming status line is shown. The
+// operator's input is preserved by the submit guard, so they can simply resend
+// once Billy responds.
+func (m *model) handleTurnInProgress() (tea.Model, tea.Cmd) {
+	m.thinking = false
+	m.isStreaming = false
+	m.liveMsg = ""
+	m.streamBuffer = ""
+	m.saveStatus = turnInProgressMessage
+	m.saveStatusTicks = 4
+	m.updateChatViewport()
+	return m, nil
+}
+
 func (m model) Init() tea.Cmd {
 	healthCmd := func() tea.Msg {
 		err := m.client.Health()
@@ -310,6 +328,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isStreaming = false
 		m.liveMsg = ""
 		m.thinking = true
+		// 409 turn-in-progress: a non-streaming retry would 409 again, so do
+		// not fall back to /ask. Surface the friendly status and drop the turn.
+		if errors.Is(msg.Err, errTurnInProgress) {
+			return m.handleTurnInProgress()
+		}
 		if msg.Prompt == "" {
 			m.thinking = false
 			m.messages = append(m.messages, "⚠️  streaming error")
@@ -318,6 +341,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, ask(msg.Prompt, m.client.sessionID, m.client.baseURL)
+
+	// ── 409 turn-in-progress (non-streaming path) ─────────────────────────────
+	case turnInProgressMsg:
+		return m.handleTurnInProgress()
 
 	// ── sidebar polling ──────────────────────────────────────────────────────
 	case sidebarTickMsg:
