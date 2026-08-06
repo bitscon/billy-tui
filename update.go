@@ -32,7 +32,11 @@ func (m *model) releaseStream() {
 
 func (m *model) appendStreamChunk(chunk string) {
 	m.streamBuffer += chunk
-	m.streamTokens += len(chunk)/4 + 1
+	// Estimate from the whole buffer, not a running per-chunk sum. The old
+	// `+= len(chunk)/4 + 1` added 1 per chunk (inflating the live count) and,
+	// via per-chunk integer division, diverged from the non-streaming
+	// len(text)/4. Deriving from the full buffer keeps both paths on one basis.
+	m.streamTokens = len(m.streamBuffer) / 4
 }
 
 // highlightStreamBuffer applies code-fence background styling during live stream.
@@ -91,11 +95,11 @@ func (m *model) rebuildDisplayMessages() {
 		switch {
 		case strings.HasPrefix(raw, "[You] "):
 			rebuilt = append(rebuilt, UserInputStyle.Render(raw))
-		case strings.HasPrefix(raw, "[Billy] 🛡"):
-			rebuilt = append(rebuilt, ErrorStyle.Render(raw))
 		case strings.HasPrefix(raw, "[Billy] "):
 			rebuilt = append(rebuilt, BillyResponseStyle.Render("[Billy] ")+m.renderResponse(strings.TrimPrefix(raw, "[Billy] ")))
 		default:
+			// TUI notices (governance shield, ⚠️ health errors) and anything not
+			// explicitly a [You]/[Billy] line render error-styled, never attributed.
 			rebuilt = append(rebuilt, ErrorStyle.Render(raw))
 		}
 	}
@@ -229,11 +233,13 @@ func (m model) Init() tea.Cmd {
 		err := m.client.Health()
 		return healthResultMsg{err: err}
 	}
-	// Populate the sidebar immediately on launch rather than waiting for the
-	// first 5s tick, so model/provider/status are not blank at startup.
+	// Kick off sidebar polling with a single immediate one-shot so the sidebar
+	// is populated at startup instead of blank until the first tick. The
+	// sidebarTickMsg handler self-reschedules every 5s, so this is the only poll
+	// source — adding a second recurring tea.Tick here ran two self-rescheduling
+	// chains in parallel and doubled the effective poll rate (~2.5s, 4 GETs each).
 	sidebarNow := func() tea.Msg { return sidebarTickMsg{} }
-	sidebarTick := tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return sidebarTickMsg{} })
-	return tea.Batch(textarea.Blink, m.spinner.Tick, healthCmd, sidebarNow, sidebarTick)
+	return tea.Batch(textarea.Blink, m.spinner.Tick, healthCmd, sidebarNow)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -388,6 +394,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rendered := m.renderResponse(msg.FullText)
 			m.messages = append(m.messages, "[Billy] "+msg.FullText)
 			m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
+			// Final token estimate from the full text — the same len(text)/4
+			// basis the non-streaming path uses, so streamed and blocking turns
+			// report the same count for the same reply.
+			m.sidebar.lastTokens = len(msg.FullText) / 4
 		}
 		m.liveMsg = ""
 		m.streamBuffer = ""
@@ -395,9 +405,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		m.lastLatency = time.Since(m.requestStarted)
 		m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
-		if m.streamTokens > 0 {
-			m.sidebar.lastTokens = m.streamTokens
-		}
 		m.updateChatViewport()
 		return m, nil
 
@@ -455,9 +462,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Governance border pulse when a new rejection lands.
 			if st.Telemetry.Rejected > m.lastGovRejected {
 				m.governanceAlertTicks = 3
-				plain := "[Billy] 🛡 Action blocked by governance policy."
-				m.messages = append(m.messages, plain)
-				m.displayMessages = append(m.displayMessages, ErrorStyle.Render(plain))
+				// TUI-generated notice — must NOT carry the "[Billy]" prefix. It is
+				// the interface reporting a governance event, not Billy speaking;
+				// stamping it "[Billy]" made exportChat/buildMarkdown attribute this
+				// local line to Billy, breaking the model.go invariant ("the TUI must
+				// never speak AS Billy"). Unprefixed, export drops it and the debug
+				// save renders it as a system note.
+				notice := "🛡 Action blocked by governance policy."
+				m.messages = append(m.messages, notice)
+				m.displayMessages = append(m.displayMessages, ErrorStyle.Render(notice))
 				m.updateChatViewport()
 			}
 			m.lastGovRejected = st.Telemetry.Rejected
