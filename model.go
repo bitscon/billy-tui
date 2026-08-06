@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -17,6 +18,11 @@ const (
 	paneInput pane = iota
 	paneChat
 )
+
+// maxInputRows caps how tall the multi-line input box may grow. The box starts
+// at one row and grows by one for each newline (ctrl+j / alt+enter) the operator
+// enters, up to this ceiling, after which the textarea scrolls internally.
+const maxInputRows = 6
 
 type model struct {
 	// layout
@@ -151,9 +157,17 @@ func newMdRenderer(width int) *glamour.TermRenderer {
 
 func initialModel(client *billyClient) model {
 	ti := textarea.New()
-	ti.Placeholder = "Message Billy…   ↑/↓ history   ? help   :command"
+	ti.Placeholder = "Message Billy…   ctrl+j newline   ↑/↓ history   ? help   :command"
 	ti.ShowLineNumbers = false
 	ti.CharLimit = 4096
+	ti.Prompt = "> "
+	// `enter` is intercepted for submit before the textarea sees it, so rebind
+	// newline insertion to ctrl+j (reliably distinct from enter — it is LF, not
+	// CR) and alt+enter, letting the operator write multi-line prompts.
+	ti.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("ctrl+j", "alt+enter"),
+		key.WithHelp("ctrl+j", "newline"),
+	)
 	ti.SetHeight(1)
 	ti.Focus()
 

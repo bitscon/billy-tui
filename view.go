@@ -30,6 +30,7 @@ var helpContent = strings.TrimSpace(`
   Keys
   ────────────────────────────────
   enter         Send message
+  ctrl+j        Newline (multi-line input)
   esc           Abandon the reply Billy is generating
   ↑ / ↓         Cycle input history
   tab           Toggle scroll / input focus
@@ -66,6 +67,16 @@ func (m model) View() string {
 	}
 
 	chatWidth := (m.width * 7) / 10
+
+	// The input box may occupy several rows (multi-line input); the panes take
+	// whatever height is left after the status row, the input, the hint row, and
+	// the pane border. refreshInputHeight keeps m.input.Height() and the viewport
+	// height consistent with this same arithmetic.
+	inputRows := m.input.Height()
+	paneHeight := m.height - 4 - inputRows
+	if paneHeight < 4 {
+		paneHeight = 4
+	}
 
 	// ── status bar ───────────────────────────────────────────────────────────
 	var statusParts []string
@@ -110,14 +121,14 @@ func (m model) View() string {
 	}
 	chatPane := chatStyle.
 		Width(chatWidth).
-		Height(m.height - 5).
+		Height(paneHeight).
 		Render(m.chatViewport.View())
 
 	// ── sidebar pane ─────────────────────────────────────────────────────────
 	sidebarPane := NormalPaneStyle.
 		Width(m.sidebarWidth).
-		Height(m.height - 5).
-		Render(renderSidebar(m.sidebar, m.sidebarWidth-2, m.height-5))
+		Height(paneHeight).
+		Render(renderSidebar(m.sidebar, m.sidebarWidth-2, paneHeight))
 
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, chatPane, sidebarPane)
 
@@ -137,9 +148,11 @@ func (m model) View() string {
 		if m.focusedPane == paneChat {
 			focusIndicator = DimStyle.Render("scroll") + " tab→input"
 		}
-		inputRow = fmt.Sprintf("> %s", m.input.View())
+		// The "> " prompt is rendered by the textarea itself (m.input.Prompt) so
+		// it prefixes every line of a multi-line entry, not just the first.
+		inputRow = m.input.View()
 		hintRow = HintBarStyle.Width(m.width).Render(
-			focusIndicator + "  tab scroll  pgup/dn  ctrl+l clear  ctrl+s save  ? help",
+			focusIndicator + "  ctrl+j newline  tab scroll  ctrl+l clear  ctrl+s save  ? help",
 		)
 	}
 
@@ -152,15 +165,24 @@ func (m model) View() string {
 
 	// ── model picker overlay ──────────────────────────────────────────────────
 	if m.modelPickerMode {
+		start, end := modelPickerWindow(m.modelPickerIdx, len(m.modelOptions), m.height)
+
 		var b strings.Builder
 		b.WriteString(SectionHeaderStyle.Render("Select a model") + "\n")
 		b.WriteString(DimStyle.Render("↑/↓ move · enter switch · esc cancel") + "\n\n")
-		for i, opt := range m.modelOptions {
+		if start > 0 {
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
+		}
+		for i := start; i < end; i++ {
+			opt := m.modelOptions[i]
 			if i == m.modelPickerIdx {
 				b.WriteString(UserInputStyle.Render("▸ "+opt.label) + "\n")
 			} else {
 				b.WriteString("  " + opt.label + "\n")
 			}
+		}
+		if end < len(m.modelOptions) {
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↓ %d more", len(m.modelOptions)-end)) + "\n")
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
 		return lipgloss.Place(
@@ -183,6 +205,35 @@ func (m model) View() string {
 	}
 
 	return rendered
+}
+
+// modelPickerWindow returns the [start,end) slice of model options to display so
+// a long list (e.g. an Ollama host with many models) never overflows the screen.
+// The window is sized to the terminal height, keeps the selected index visible
+// (centered where possible), and is clamped to the option count. Callers show a
+// "N more" affordance when start>0 or end<total.
+func modelPickerWindow(idx, total, termHeight int) (start, end int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	// Chrome inside the overlay: header + hint + blank (3), the two "N more"
+	// rows (2), and the overlay border (2). Reserve that and keep at least 3
+	// option rows visible even on a short terminal.
+	visible := termHeight - 10
+	if visible < 3 {
+		visible = 3
+	}
+	if visible >= total {
+		return 0, total
+	}
+	start = idx - visible/2
+	if start < 0 {
+		start = 0
+	}
+	if start > total-visible {
+		start = total - visible
+	}
+	return start, start + visible
 }
 
 // DimStyle is a convenience alias exposed for update.go hint text.

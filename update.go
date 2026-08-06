@@ -112,6 +112,55 @@ func (m *model) rebuildDisplayMessages() {
 func (m *model) restoreFailedPrompt() {
 	if m.lastPrompt != "" && m.input.Value() == "" {
 		m.input.SetValue(m.lastPrompt)
+		m.refreshInputHeight() // a restored multi-line prompt re-grows the box
+	}
+}
+
+// desiredInputRows returns how many rows the input box should occupy: it grows
+// with the number of logical lines the operator has entered (one per ctrl+j
+// newline) up to maxInputRows, and is further capped on short terminals so the
+// chat viewport never drops below its 4-row floor.
+func (m model) desiredInputRows() int {
+	rows := m.input.LineCount()
+	if rows < 1 {
+		rows = 1
+	}
+	limit := maxInputRows
+	if m.ready {
+		// Layout below the panes is: input rows + 1 hint line; the panes add a
+		// 2-row border and there is 1 status row on top. Keeping vpHeight ≥ 4
+		// means input rows ≤ height-8.
+		if avail := m.height - 8; avail < limit {
+			limit = avail
+		}
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if rows > limit {
+		rows = limit
+	}
+	return rows
+}
+
+// refreshInputHeight grows or shrinks the input box to fit its content and keeps
+// the chat viewport height in sync, so the status row, panes, input, and hint row
+// always sum to the terminal height. Call after any change to the input content.
+func (m *model) refreshInputHeight() {
+	rows := m.desiredInputRows()
+	if m.input.Height() != rows {
+		m.input.SetHeight(rows)
+	}
+	if !m.ready {
+		return
+	}
+	vpH := m.height - 4 - rows
+	if vpH < 4 {
+		vpH = 4
+	}
+	if m.chatViewport.Height != vpH {
+		m.chatViewport.Height = vpH
+		m.updateChatViewport()
 	}
 }
 
@@ -260,11 +309,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sidebarWidth = 0
 		}
 
-		// Reserve 2 lines below panes: 1 for textarea row, 1 for hint/command bar.
-		// Panes: Height() sets inner height; border adds 2 more → paneOuter = inner+2.
-		// Layout: 1(status) + (inner+2)(panes) + 1(input) + 1(hint) = inner+5 = height
-		// → inner = height-5
-		vpHeight := msg.Height - 5
+		// Reserve rows below the panes: the input box (1..maxInputRows) + 1
+		// hint/command bar. Panes: Height() sets inner height; border adds 2 more
+		// → paneOuter = inner+2. Layout: 1(status) + (inner+2)(panes) + N(input) +
+		// 1(hint) = inner+N+4 = height → inner = height-4-N. refreshInputHeight
+		// (called below) is the authoritative sync; this seeds a sane initial size.
+		vpHeight := msg.Height - 4 - m.input.Height()
 		if vpHeight < 4 {
 			vpHeight = 4
 		}
@@ -273,6 +323,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			mdWidth = 20
 		}
 		m.mdRenderer = newMdRenderer(mdWidth)
+		m.input.SetWidth(msg.Width - 4)
 		if !m.ready {
 			m.chatViewport = viewport.New(chatWidth, vpHeight)
 			m.chatViewport.SetContent(strings.Join(m.displayMessages, "\n"))
@@ -286,7 +337,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildDisplayMessages()
 			m.updateChatViewport()
 		}
-		m.input.SetWidth(msg.Width - 4)
+		// A shorter terminal may force a multi-line input to shrink; re-clamp the
+		// input height against the new size and finalize the viewport height.
+		m.refreshInputHeight()
 		return m, nil
 
 	// ── spinner ──────────────────────────────────────────────────────────────
@@ -662,6 +715,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, "[You] "+userMsg)
 				m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+userMsg))
 				m.input.Reset()
+				m.refreshInputHeight() // collapse a multi-line box back to one row
 				m.lastPrompt = userMsg
 				// New turn: bump the generation and open a cancelable, generously
 				// bounded context. thinking=true with isStreaming=false lets the
@@ -692,6 +746,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.historyIdx++
 					m.input.SetValue(m.inputHistory[len(m.inputHistory)-1-m.historyIdx])
 				}
+				m.refreshInputHeight() // a recalled multi-line entry re-grows the box
 				return m, nil
 
 			case "down":
@@ -702,10 +757,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.historyIdx = -1
 					m.input.SetValue(m.draftInput)
 				}
+				m.refreshInputHeight()
 				return m, nil
 
 			case "ctrl+u":
 				m.input.Reset()
+				m.refreshInputHeight()
 				m.historyIdx = -1
 				m.draftInput = ""
 				return m, nil
@@ -738,6 +795,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.focusedPane == paneInput {
 		var inputCmd tea.Cmd
 		m.input, inputCmd = m.input.Update(msg)
+		// A ctrl+j newline (or a backspace that removes one) changes the line
+		// count; regrow/shrink the box and re-sync the viewport height.
+		m.refreshInputHeight()
 		cmds = append(cmds, inputCmd)
 	}
 
