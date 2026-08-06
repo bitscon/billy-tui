@@ -38,6 +38,7 @@ var helpContent = strings.TrimSpace(`
   ctrl+l        Clear chat
   ctrl+u        Clear input line
   ctrl+s        Save debug log
+  ctrl+t        Toggle mouse capture (off = select/copy text)
   :             Command palette
   ?             This help  (any key to close)
   ctrl+c        Quit
@@ -45,7 +46,7 @@ var helpContent = strings.TrimSpace(`
   Commands  (type : then command)
   ────────────────────────────────
   :clear        Clear chat
-  :export       Export conversation to ~/billy-chat-DATE.md
+  :export       Export conversation to ~/.billy/exports/
   :session new  Start a new session
   :model        Pick a model (interactive)
   :model P [M]  Switch to provider P (optional model M)

@@ -8,25 +8,39 @@ import (
 	"time"
 )
 
+// billyDir resolves a billy-tui output directory and creates it. It uses the
+// value of envVar when set, otherwise ~/.billy/<sub...>. Keeping every artifact
+// under ~/.billy (never the $HOME root) is deliberate — the home root stays
+// clean and nothing lands where it could clutter or be committed by accident.
+func billyDir(envVar string, sub ...string) (string, error) {
+	dir := os.Getenv(envVar)
+	if dir == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve home dir: %w", err)
+		}
+		dir = filepath.Join(append([]string{homeDir, ".billy"}, sub...)...)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
 // saveChat writes the raw debug log — preserves all message types including
 // errors and system notices. Used by ctrl+s.
+//
+// Both the stable "latest" pointer and the timestamped archive live under
+// ~/.billy/debug (override with BILLY_DEBUG_DIR); nothing is written to the
+// $HOME root. Previously the "latest" copy landed in the home root and only the
+// archive was tidied away — this keeps the pair together and out of $HOME.
 func saveChat(messages []string, sessionID string) (string, error) {
-	homeDir, err := os.UserHomeDir()
+	debugDir, err := billyDir("BILLY_DEBUG_DIR", "debug")
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve home dir: %w", err)
+		return "", err
 	}
 
-	latestPath := filepath.Join(homeDir, "billy-chat-debug-latest.md")
-
-	// Archive copies default to ~/.billy/debug (override with BILLY_DEBUG_DIR) —
-	// never inside a source tree, where they would clutter / risk being committed.
-	debugDir := os.Getenv("BILLY_DEBUG_DIR")
-	if debugDir == "" {
-		debugDir = filepath.Join(homeDir, ".billy", "debug")
-	}
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
-		return "", fmt.Errorf("cannot create debug dir: %w", err)
-	}
+	latestPath := filepath.Join(debugDir, "billy-chat-debug-latest.md")
 	timestamp := time.Now().Format("2006-01-02-150405")
 	archivePath := filepath.Join(debugDir, "billy-chat-"+timestamp+".md")
 
@@ -41,16 +55,18 @@ func saveChat(messages []string, sessionID string) (string, error) {
 	return latestPath, nil
 }
 
-// exportChat writes a clean, human-readable conversation export. Used by :export.
+// exportChat writes a clean, human-readable conversation export. Used by
+// :export. Defaults to ~/.billy/exports (override with BILLY_EXPORT_DIR) so the
+// export never clutters the $HOME root.
 func exportChat(messages []string, sessionID string) (string, error) {
-	homeDir, err := os.UserHomeDir()
+	exportDir, err := billyDir("BILLY_EXPORT_DIR", "exports")
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve home dir: %w", err)
+		return "", err
 	}
 
 	timestamp := time.Now().Format("2006-01-02-150405")
 	filename := fmt.Sprintf("billy-chat-%s.md", timestamp)
-	path := filepath.Join(homeDir, filename)
+	path := filepath.Join(exportDir, filename)
 
 	var b strings.Builder
 	b.WriteString("# Billy Chat\n\n")

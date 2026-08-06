@@ -95,6 +95,34 @@ func TestRefreshInputHeightSyncsViewport(t *testing.T) {
 	}
 }
 
+// ctrl+t flips mouse capture and emits a bubbletea mouse command each time:
+// off→on returns EnableMouseCellMotion (wheel scroll), on→off DisableMouse
+// (native text-select restored). Default is off so selection works out of box.
+func TestCtrlTTogglesMouseCapture(t *testing.T) {
+	m := initialModel(nil)
+	tm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+
+	if tm.(model).mouseCapture {
+		t.Fatalf("mouse capture should start OFF (native text-select works)")
+	}
+
+	tm, cmd := tm.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if !tm.(model).mouseCapture {
+		t.Fatalf("ctrl+t should turn mouse capture ON")
+	}
+	if cmd == nil {
+		t.Fatalf("enabling capture should return a mouse command")
+	}
+
+	tm, cmd = tm.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if tm.(model).mouseCapture {
+		t.Fatalf("a second ctrl+t should turn mouse capture back OFF")
+	}
+	if cmd == nil {
+		t.Fatalf("disabling capture should return a mouse command")
+	}
+}
+
 // ctrl+j inserts a newline (rather than submitting or being swallowed) and the
 // box grows a row — the end-to-end proof the multi-line input works.
 func TestCtrlJInsertsNewlineAndGrows(t *testing.T) {

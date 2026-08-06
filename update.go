@@ -662,6 +662,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateChatViewport()
 			return m, nil
 
+		case "ctrl+t":
+			// Toggle terminal mouse capture. Off (default) leaves native
+			// click-drag select-and-copy working; on gives the chat viewport
+			// mouse-wheel scroll at the cost of native selection.
+			m.mouseCapture = !m.mouseCapture
+			if m.mouseCapture {
+				m.saveStatus = "🖱 Mouse capture ON — wheel scroll (native text-select off)"
+				m.saveStatusTicks = 4
+				return m, tea.EnableMouseCellMotion
+			}
+			m.saveStatus = "🖱 Mouse capture OFF — select & copy text"
+			m.saveStatusTicks = 4
+			return m, tea.DisableMouse
+
 		case "tab":
 			if m.focusedPane == paneInput {
 				m.focusedPane = paneChat

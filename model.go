@@ -54,6 +54,11 @@ type model struct {
 	// UI overlays
 	showHelp bool
 
+	// mouseCapture tracks whether the terminal mouse is captured. It starts false
+	// so native text selection / copy works; ctrl+t toggles it. When on, the chat
+	// viewport gains mouse-wheel scroll but native select-and-copy is suppressed.
+	mouseCapture bool
+
 	// model picker (':model' command)
 	modelPickerMode bool
 	modelOptions    []modelOption
