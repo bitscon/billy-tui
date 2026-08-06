@@ -20,5 +20,7 @@ Git repository initialized for `bitscon/billy-tui`; initial scaffold commit reco
 - [Model Switching] `:model` command (ADR-0125 Amendment 2026-06-20b) — interactive picker via GET /api/v1/llm/models; `:model <provider> [model]` switches via POST /api/v1/llm/config (sanctioned operator API); preserves base_url within a provider; sidebar reflects change live
 
 ## Next Steps
-- TBD (mission-progress section deferred until TUI tracks an active mission id)
-- Chat-driven model switching (Lever 1) pending operator decision to supersede the frozen conversational grammar (CONVERSATIONAL_RUNTIME_LLM_CONFIG_GRAMMAR_V1)
+The code-review remediation build (Phases 1–4) is closed. Two forward-looking feature ideas are now tracked on the billy-tui Kanboard board (Backlog, `status:blocked`); both carry an acceptance checklist there.
+
+- **Sidebar mission-progress section** (`billy-tui:features:mission-progress`) — add a sixth real-data sidebar section for the active mission/goal + progress, bound to a real endpoint like the existing five (ADR-0125 Amendment 2026-06-20, no placeholders). Blocked until the runtime exposes an active mission id for the TUI to track.
+- **Chat-driven model switching (Lever 1)** (`billy-tui:features:chat-model-switch`) — let the operator switch models conversationally, routed through the same sanctioned `SetLLMConfig` path (`POST /api/v1/llm/config`) the `:model` command already uses. Blocked on an operator decision to supersede the frozen conversational grammar `CONVERSATIONAL_RUNTIME_LLM_CONFIG_GRAMMAR_V1`.
