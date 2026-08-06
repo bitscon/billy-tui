@@ -170,12 +170,16 @@ func renderSidebar(s sidebarState, width, height int) string {
 	return style.Render(content)
 }
 
+// truncate shortens s to at most max display runes, appending an ellipsis when
+// it cuts. It counts and slices by rune, so it never splits a multi-byte
+// character in a model name or denial code.
 func truncate(s string, max int) string {
 	if max < 1 {
 		return s
 	}
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	return string(r[:max-1]) + "…"
 }

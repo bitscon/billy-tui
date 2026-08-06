@@ -67,6 +67,17 @@ func (m *model) updateChatViewport() {
 	m.chatViewport.GotoBottom()
 }
 
+// clearChat resets the conversation surface — both the raw and displayed
+// message logs and any in-flight streaming buffer — then refreshes the
+// viewport. Shared by the ":clear" command and the ctrl+l shortcut.
+func (m *model) clearChat() {
+	m.messages = []string{}
+	m.displayMessages = []string{}
+	m.liveMsg = ""
+	m.streamBuffer = ""
+	m.updateChatViewport()
+}
+
 // renderResponse renders a completed Billy response using the cached Glamour
 // renderer when available, falling back to a fresh renderer otherwise.
 func (m *model) renderResponse(text string) string {
@@ -229,11 +240,7 @@ func (m *model) execCommand(raw string) tea.Cmd {
 		m.saveStatusTicks = 4
 		return setModel(m.client, provider, model)
 	case "clear", "c":
-		m.messages = []string{}
-		m.displayMessages = []string{}
-		m.liveMsg = ""
-		m.streamBuffer = ""
-		m.updateChatViewport()
+		m.clearChat()
 	case "export", "e":
 		path, err := exportChat(m.messages, m.client.sessionID)
 		if err != nil {
@@ -245,10 +252,7 @@ func (m *model) execCommand(raw string) tea.Cmd {
 	case "session":
 		if len(parts) > 1 && parts[1] == "new" {
 			m.client.sessionID = fmt.Sprintf("tui-%d", time.Now().UnixNano())
-			short := m.client.sessionID
-			if len(short) > 20 {
-				short = short[:20]
-			}
+			short := truncate(m.client.sessionID, 20)
 			m.saveStatus = "✓ New session: " + short
 			m.saveStatusTicks = 4
 		}
@@ -655,11 +659,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "ctrl+l":
-			m.messages = []string{}
-			m.displayMessages = []string{}
-			m.liveMsg = ""
-			m.streamBuffer = ""
-			m.updateChatViewport()
+			m.clearChat()
 			return m, nil
 
 		case "ctrl+t":

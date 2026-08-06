@@ -92,10 +92,7 @@ func (m model) View() string {
 	statusParts = append(statusParts, StatusBarStyle.Render(base))
 
 	// session (abbreviated)
-	sess := m.client.sessionID
-	if len(sess) > 16 {
-		sess = sess[:16] + "…"
-	}
+	sess := truncate(m.client.sessionID, 16)
 	statusParts = append(statusParts, StatusBarStyle.Render("session:"+sess))
 
 	// latency

@@ -13,9 +13,7 @@ var (
 	colorWarning          = lipgloss.AdaptiveColor{Light: "#B86000", Dark: "#FFB347"}
 	colorError            = lipgloss.AdaptiveColor{Light: "#8B0000", Dark: "#C54E3A"}
 	colorDiffAdd          = lipgloss.AdaptiveColor{Light: "#3A6B00", Dark: "#7CB32B"}
-	colorDiffRemove       = lipgloss.AdaptiveColor{Light: "#8B0000", Dark: "#C54E3A"}
 	colorText             = lipgloss.AdaptiveColor{Light: "#1A1A1A", Dark: "#E8E8E8"}
-	colorDim              = lipgloss.AdaptiveColor{Light: "#AAAAAA", Dark: "#555555"}
 	colorSubtle           = lipgloss.AdaptiveColor{Light: "#888888", Dark: "#666666"}
 	colorFocusBorder      = lipgloss.AdaptiveColor{Light: "#0066CC", Dark: "#00CFFF"}
 	colorNormalBorder     = lipgloss.AdaptiveColor{Light: "#999999", Dark: "#3A3A3A"}
@@ -117,11 +115,4 @@ var (
 	SidebarBadStyle  = lipgloss.NewStyle().Foreground(colorError)
 	SidebarWarnStyle = lipgloss.NewStyle().Foreground(colorWarning)
 	SidebarKeyStyle  = lipgloss.NewStyle().Foreground(colorSubtle)
-)
-
-// suppress unused colour warnings for palette entries not yet wired to styles
-var (
-	_ = colorBackground
-	_ = colorDiffRemove
-	_ = colorDim
 )

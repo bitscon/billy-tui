@@ -1,4 +1,4 @@
-.PHONY: build run test
+.PHONY: build run vet test
 
 build:
 	go build -o bin/billy-tui ./...
@@ -6,5 +6,8 @@ build:
 run:
 	./bin/billy-tui
 
-test:
+vet:
+	go vet ./...
+
+test: vet
 	go test ./...
