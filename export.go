@@ -27,17 +27,29 @@ func billyDir(envVar string, sub ...string) (string, error) {
 	return dir, nil
 }
 
+// defaultDebugDir is where ctrl+s writes the chat debug log. It lives outside any
+// user's $HOME on purpose: billy-tui runs as the operator, but the "debug billy"
+// investigation runs under a separate agent account that must be able to read the
+// capture. /tmp is world-readable and needs no root setup; a reboot clearing it is
+// fine for a transient debug log. Override with BILLY_DEBUG_DIR (e.g. point it at
+// /var/lib/billy/chat-log for a reboot-durable dir, once that exists group-writable).
+const defaultDebugDir = "/tmp/billy/chat-log"
+
 // saveChat writes the raw debug log — preserves all message types including
 // errors and system notices. Used by ctrl+s.
 //
-// Both the stable "latest" pointer and the timestamped archive live under
-// ~/.billy/debug (override with BILLY_DEBUG_DIR); nothing is written to the
-// $HOME root. Previously the "latest" copy landed in the home root and only the
-// archive was tidied away — this keeps the pair together and out of $HOME.
+// Both the stable "latest" pointer and the timestamped archive live in
+// defaultDebugDir (override with BILLY_DEBUG_DIR); nothing is written to the
+// $HOME root. The location sits outside $HOME so the agent account that runs the
+// "debug billy" flow can read what the operator saves — cross-account reach is
+// the whole reason it moved off the home directory.
 func saveChat(messages []string, sessionID string) (string, error) {
-	debugDir, err := billyDir("BILLY_DEBUG_DIR", "debug")
-	if err != nil {
-		return "", err
+	debugDir := os.Getenv("BILLY_DEBUG_DIR")
+	if debugDir == "" {
+		debugDir = defaultDebugDir
+	}
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		return "", fmt.Errorf("cannot create %s: %w", debugDir, err)
 	}
 
 	latestPath := filepath.Join(debugDir, "billy-chat-debug-latest.md")

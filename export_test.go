@@ -86,18 +86,18 @@ func TestExportChatHonorsEnvOverride(t *testing.T) {
 	}
 }
 
-// ctrl+s save must put both the "latest" pointer and the timestamped archive
-// under ~/.billy/debug — nothing in the $HOME root.
-func TestSaveChatWritesUnderBillyDebug(t *testing.T) {
+// ctrl+s save must put both the "latest" pointer and the timestamped archive in
+// the debug dir (BILLY_DEBUG_DIR override), and never in the $HOME root.
+func TestSaveChatWritesToDebugDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("BILLY_DEBUG_DIR", "") // force the default path
+	debugDir := t.TempDir()
+	t.Setenv("BILLY_DEBUG_DIR", debugDir)
 
 	latest, err := saveChat([]string{"[You] hi", "[Billy] hey"}, "sess-1")
 	if err != nil {
 		t.Fatalf("saveChat: %v", err)
 	}
-	debugDir := filepath.Join(home, ".billy", "debug")
 	if filepath.Dir(latest) != debugDir {
 		t.Fatalf("latest dir = %s, want %s", filepath.Dir(latest), debugDir)
 	}
@@ -114,6 +114,18 @@ func TestSaveChatWritesUnderBillyDebug(t *testing.T) {
 	}
 	if homeHasChatFiles(t, home) {
 		t.Fatalf("save leaked a file into the $HOME root")
+	}
+}
+
+// The default debug dir sits outside any user's $HOME so the agent account that
+// runs "debug billy" can read captures the operator saves — the reachability the
+// move to a shared path exists to guarantee.
+func TestDefaultDebugDirIsOutsideHome(t *testing.T) {
+	if defaultDebugDir != "/tmp/billy/chat-log" {
+		t.Fatalf("defaultDebugDir = %q, want /tmp/billy/chat-log", defaultDebugDir)
+	}
+	if strings.HasPrefix(defaultDebugDir, "/home/") {
+		t.Fatalf("defaultDebugDir must not live under a user home: %s", defaultDebugDir)
 	}
 }
 
