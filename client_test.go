@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -182,6 +185,148 @@ func TestOpenAskStreamOtherError(t *testing.T) {
 	if !strings.Contains(err.Error(), "stream request failed: 503") {
 		t.Fatalf("expected 'stream request failed: 503', got %v", err)
 	}
+}
+
+// TestUnixSocketPath verifies the scheme parser: which addresses select the
+// Unix-socket transport and the socket path each yields.
+func TestUnixSocketPath(t *testing.T) {
+	cases := []struct {
+		addr     string
+		wantPath string
+		wantOK   bool
+	}{
+		{"unix:///home/billyb/.billy/sock/billy.sock", "/home/billyb/.billy/sock/billy.sock", true},
+		{"unix:/tmp/b.sock", "/tmp/b.sock", true},
+		{"http://localhost:5001", "", false},
+		{"https://example:443", "", false},
+		{"localhost:5001", "", false},
+		{"", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.addr, func(t *testing.T) {
+			gotPath, gotOK := unixSocketPath(tc.addr)
+			if gotOK != tc.wantOK || gotPath != tc.wantPath {
+				t.Fatalf("unixSocketPath(%q) = (%q, %v), want (%q, %v)",
+					tc.addr, gotPath, gotOK, tc.wantPath, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestResolveTransport verifies the TCP path is left untouched (address passes
+// through, no custom transport) while a unix:// address selects the socket
+// transport and the fixed dummy base URL.
+func TestResolveTransport(t *testing.T) {
+	// TCP: address passes through verbatim, transport stays nil (net/http's
+	// default) — this is the pre-existing behaviour, unchanged.
+	for _, addr := range []string{"http://localhost:5001", "https://example:443"} {
+		base, rt := resolveTransport(addr)
+		if base != addr {
+			t.Fatalf("resolveTransport(%q) base = %q, want %q", addr, base, addr)
+		}
+		if rt != nil {
+			t.Fatalf("resolveTransport(%q) rt = %v, want nil (default transport)", addr, rt)
+		}
+	}
+	// Unix: dummy base URL and a non-nil socket-dialing transport.
+	base, rt := resolveTransport("unix:///tmp/b.sock")
+	if base != unixBaseURL {
+		t.Fatalf("resolveTransport(unix) base = %q, want %q", base, unixBaseURL)
+	}
+	if rt == nil {
+		t.Fatalf("resolveTransport(unix) rt = nil, want a socket transport")
+	}
+}
+
+// TestUnixSocketTransportEndToEnd proves the client genuinely speaks HTTP over an
+// AF_UNIX socket: it stands up a real Unix-socket listener with an http.Server and
+// drives all three request kinds the TUI uses — a GET (/health), a POST (/ask),
+// and an SSE stream (/ask/stream) — through the built client. This is the
+// reproduction that separates "the code looks right" from "the socket carries the
+// session" (AGENT_OS §21.4 evidence standard).
+func TestUnixSocketTransportEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "b.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix %s: %v", sock, err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/ask", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"message":"socket ok"}`)
+	})
+	mux.HandleFunc("/ask/stream", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"sock \",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"stream\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true}\n\n")
+	})
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	c := newBillyClient("unix://" + sock)
+	if c.baseURL != unixBaseURL {
+		t.Fatalf("baseURL = %q, want %q", c.baseURL, unixBaseURL)
+	}
+
+	if err := c.Health(); err != nil {
+		t.Fatalf("Health over socket: %v", err)
+	}
+
+	msg, err := c.doAsk("hi")
+	if err != nil {
+		t.Fatalf("doAsk over socket: %v", err)
+	}
+	if msg != "socket ok" {
+		t.Fatalf("doAsk over socket = %q, want %q", msg, "socket ok")
+	}
+
+	ch, err := c.openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("openAskStream over socket: %v", err)
+	}
+	full, err := drainStream(ch)
+	if err != nil {
+		t.Fatalf("stream over socket: %v", err)
+	}
+	if full != "sock stream" {
+		t.Fatalf("stream over socket = %q, want %q", full, "sock stream")
+	}
+}
+
+// TestLiveSocketSession is an opt-in integration check against a running
+// billy-runtime over its real Unix domain socket. It stays skipped during the
+// ordinary hermetic suite (`go test ./...`) so CI needs no live service, and gives
+// the operator a one-command proof on the barn:
+//
+//	BILLY_LIVE_SOCKET=/home/billyb/.billy/sock/billy.sock \
+//	    go test -run TestLiveSocketSession -v
+//
+// It exercises the client's own socket path (Health + GET /api/v1/llm/config) and
+// deliberately avoids a live LLM turn, so it is cheap, deterministic, and never
+// trips the runtime's one-turn-at-a-time guard.
+func TestLiveSocketSession(t *testing.T) {
+	sock := os.Getenv("BILLY_LIVE_SOCKET")
+	if sock == "" {
+		t.Skip("set BILLY_LIVE_SOCKET=/path/to/billy.sock to exercise a running billy-runtime over its socket")
+	}
+	c := newBillyClient("unix://" + sock)
+	if err := c.Health(); err != nil {
+		t.Fatalf("Health over live socket %s: %v", sock, err)
+	}
+	cfg, err := c.LLMConfig()
+	if err != nil {
+		t.Fatalf("LLMConfig over live socket: %v", err)
+	}
+	if !cfg.Configured {
+		t.Fatalf("LLMConfig over live socket reports unconfigured: %+v", cfg)
+	}
+	t.Logf("live socket OK — provider=%s model=%s", cfg.Provider, cfg.Model)
 }
 
 // TestGetJSONNon200 verifies getJSON surfaces a non-200 as an error.

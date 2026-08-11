@@ -5,6 +5,8 @@ ADR-0125 Phase 1 complete + P5 (Step 75) complete. TUI connects to billy-runtime
 
 Operator sidebar redesigned (ADR-0125 Amendment 2026-06-20): five real-data sections — Connection+LLM, Runtime, Latency, Governance, Live Work Progress (I125) — each bound to a verified endpoint (`/runtime/status`, `/api/v1/llm/config`, `/reconciliation/recent`, `/api/v1/execution/jobs/active`) or a local measurement. Dead Observation/Memory stubs removed; prior placeholder sections that read nonexistent JSON keys are gone.
 
+Transport is now selectable (Modular Identity P10): `--addr` / `BILLY_ADDR` accept either `http://host:port` (TCP, the default) or `unix:///path/to/socket` (AF_UNIX). Over the socket, billy-runtime resolves the caller's principal from the kernel peer credentials, so the operator is recognised with no text challenge; TCP is unchanged and stays the default. See the README "Identity by transport" table.
+
 Git repository initialized for `bitscon/billy-tui`; initial scaffold commit recorded locally and `origin` configured. Push is intentionally deferred until the GitHub repository exists.
 
 ## Completed
@@ -18,6 +20,7 @@ Git repository initialized for `bitscon/billy-tui`; initial scaffold commit reco
 - [Streaming Parity Phase 3] Enter-key submit guard — blocks overlapping session submits while response is in progress
 - [Sidebar Redesign] Operator sidebar rebuilt against real endpoints (ADR-0125 Amendment 2026-06-20); replaces non-functional placeholder sections
 - [Model Switching] `:model` command (ADR-0125 Amendment 2026-06-20b) — interactive picker via GET /api/v1/llm/models; `:model <provider> [model]` switches via POST /api/v1/llm/config (sanctioned operator API); preserves base_url within a provider; sidebar reflects change live
+- [Modular Identity P10] Unix-socket transport — `--addr unix:///path/to/socket` dials billy-runtime over AF_UNIX for /health, /ask, /ask/stream, and the sidebar GETs; identity is transport-derived over the socket (operator recognised, no text challenge). TCP (`http://…`) preserved as the default/fallback. Proven end-to-end over a real socket (hermetic test) and against the live billy-runtime socket (opt-in `BILLY_LIVE_SOCKET` test)
 
 ## Next Steps
 The code-review remediation build (Phases 1–4) is closed. Two forward-looking feature ideas are now tracked on the billy-tui Kanboard board (Backlog, `status:blocked`); both carry an acceptance checklist there.

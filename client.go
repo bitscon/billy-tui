@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -70,15 +71,69 @@ type streamEvent struct {
 	Err      error
 }
 
-func newBillyClient(baseURL string) *billyClient {
+// unixBaseURL is the fixed authority used for requests over the Unix socket.
+// There is no real host on an AF_UNIX connection, so only the path prefixes
+// (/health, /ask, …) matter; net/http still needs a syntactically valid URL to
+// build the request line and Host header, and billy-runtime does not gate on Host.
+const unixBaseURL = "http://billy"
+
+// unixSocketPath reports whether addr selects the Unix-socket transport and, if
+// so, the filesystem path of the socket. It accepts the URL form
+// "unix:///abs/path/to.sock" (canonical, matches the curl --unix-socket / Docker
+// convention) and the shorthand "unix:/abs/path/to.sock". Anything else —
+// http://…, https://…, a bare host:port — is not a socket address.
+func unixSocketPath(addr string) (string, bool) {
+	if p, ok := strings.CutPrefix(addr, "unix://"); ok {
+		return p, true
+	}
+	if p, ok := strings.CutPrefix(addr, "unix:"); ok {
+		return p, true
+	}
+	return "", false
+}
+
+// resolveTransport interprets a billy-runtime address and returns the base URL to
+// prefix onto request paths together with the RoundTripper that carries them.
+//
+//	http://host:port (or https://…) — ordinary TCP: the base URL is the address as
+//	    given and the transport is nil, so net/http uses its default pooled
+//	    transport. This path is byte-for-byte the pre-existing behaviour.
+//	unix:///path/to/socket — AF_UNIX: every request dials the socket instead of a
+//	    TCP host and the base URL becomes unixBaseURL. This is the Go analogue of
+//	    `curl --unix-socket`.
+//
+// The Unix path carries the peer's kernel credentials (SO_PEERCRED), so a local or
+// SSH-forwarded socket connection lets billy-runtime resolve the caller's principal
+// from the transport with no text challenge — the operator (uid 1000) over the
+// socket is recognised as the operator, any other uid as that principal. The TUI
+// does nothing identity-specific; the transport speaks (Modular Identity P7/P10).
+func resolveTransport(addr string) (baseURL string, rt http.RoundTripper) {
+	socketPath, ok := unixSocketPath(addr)
+	if !ok {
+		return addr, nil
+	}
+	return unixBaseURL, &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socketPath)
+		},
+	}
+}
+
+// newBillyClient builds a client for the given address. addr is either an
+// http(s):// URL (TCP, the default) or a unix:// socket address (see
+// resolveTransport). The chosen transport is applied to both HTTP clients so that
+// /ask/stream (SSE) rides the same connection family as the plain endpoints.
+func newBillyClient(addr string) *billyClient {
+	baseURL, rt := resolveTransport(addr)
 	return &billyClient{
 		baseURL:   baseURL,
 		sessionID: fmt.Sprintf("tui-%d", time.Now().UnixNano()),
-		http:      &http.Client{Timeout: 30 * time.Second},
+		http:      &http.Client{Timeout: 30 * time.Second, Transport: rt},
 		// Streaming carries no total deadline: a slow local model (e.g. qwen)
 		// can take minutes per turn. The per-turn context (see askStream) bounds
 		// it with a generous ceiling and provides the cancel handle for `esc`.
-		streamHTTP: &http.Client{},
+		streamHTTP: &http.Client{Transport: rt},
 	}
 }
 
