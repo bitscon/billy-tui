@@ -32,6 +32,7 @@ var helpContent = strings.TrimSpace(`
   enter         Send message
   ctrl+j        Newline (multi-line input)
   esc           Abandon the reply Billy is generating
+  y / n         Approve / decline when Billy asks (or type a reply)
   ↑ / ↓         Cycle input history
   tab           Toggle scroll / input focus
   page up/dn    Scroll chat
@@ -50,8 +51,33 @@ var helpContent = strings.TrimSpace(`
   :session new  Start a new session
   :model        Pick a model (interactive)
   :model P [M]  Switch to provider P (optional model M)
+                When routing is auto, the picker sets the pin
   :help         Show this screen
 `)
+
+// statusBase builds the leading status-bar segment. Under auto routing the
+// provider/model pair from the config is the pin/home target, not necessarily
+// what answered — so the bar reports the routing state (plus the last answering
+// model, when the runtime reported one) instead of presenting the pair as the
+// answerer. Any other mode — "pinned", or "" from a legacy runtime — must stay
+// byte-identical to the pre-conductor display (contract §6).
+func statusBase(routingMode string, lastBrain *BrainReport, pinModel, pinProvider string) string {
+	base := "Billy"
+	if routingMode == "auto" {
+		base += " │ routing auto"
+		if lastBrain != nil {
+			base += " │ last: " + lastBrain.ModelID
+		}
+		return base
+	}
+	if pinModel != "" {
+		base += " │ " + pinModel
+	}
+	if pinProvider != "" {
+		base += " │ " + pinProvider
+	}
+	return base
+}
 
 func (m model) View() string {
 	if !m.ready {
@@ -82,14 +108,8 @@ func (m model) View() string {
 	// ── status bar ───────────────────────────────────────────────────────────
 	var statusParts []string
 
-	base := "Billy"
-	if m.sidebar.model != "" {
-		base += " │ " + m.sidebar.model
-	}
-	if m.sidebar.provider != "" {
-		base += " │ " + m.sidebar.provider
-	}
-	statusParts = append(statusParts, StatusBarStyle.Render(base))
+	statusParts = append(statusParts, StatusBarStyle.Render(
+		statusBase(m.routingMode, m.lastBrain, m.sidebar.model, m.sidebar.provider)))
 
 	// session (abbreviated)
 	sess := truncate(m.client.sessionID, 16)
@@ -126,7 +146,7 @@ func (m model) View() string {
 	sidebarPane := NormalPaneStyle.
 		Width(m.sidebarWidth).
 		Height(paneHeight).
-		Render(renderSidebar(m.sidebar, m.sidebarWidth-2, paneHeight))
+		Render(renderSidebar(m.sidebar, m.routingMode, m.lastBrain, m.sidebarWidth-2, paneHeight))
 
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, chatPane, sidebarPane)
 

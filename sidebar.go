@@ -49,7 +49,11 @@ func kv(key, val string) string {
 	return "  " + SidebarKeyStyle.Render(key) + " " + val
 }
 
-func renderSidebar(s sidebarState, width, height int) string {
+// renderSidebar renders the live-state pane. routingMode and lastBrain come
+// from the conductor wire contract: "" / nil mean a legacy runtime reported
+// nothing, and the output must then be byte-identical to the pre-conductor
+// sidebar (contract §6) — no routing line, no brain section.
+func renderSidebar(s sidebarState, routingMode string, lastBrain *BrainReport, width, height int) string {
 	style := lipgloss.NewStyle().Width(width).Height(height).Padding(0, 1)
 
 	var sections []string
@@ -66,11 +70,54 @@ func renderSidebar(s sidebarState, width, height int) string {
 		if s.sessionID != "" {
 			lines = append(lines, kv("session", truncate(s.sessionID, width-12)))
 		}
+		if routingMode != "" {
+			lines = append(lines, kv("routing", routingMode))
+		}
+		// Under auto the config pair is the pin/home target, not necessarily the
+		// answerer of any given turn — relabel so the sidebar never claims it is.
 		if s.model != "" {
-			lines = append(lines, kv("model", truncate(s.model, width-10)))
+			if routingMode == "auto" {
+				lines = append(lines, kv("pin model", truncate(s.model, width-14)))
+			} else {
+				lines = append(lines, kv("model", truncate(s.model, width-10)))
+			}
 		}
 		if s.provider != "" {
-			lines = append(lines, kv("provider", truncate(s.provider, width-12)))
+			if routingMode == "auto" {
+				lines = append(lines, kv("pin provider", truncate(s.provider, width-16)))
+			} else {
+				lines = append(lines, kv("provider", truncate(s.provider, width-12)))
+			}
+		}
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+
+	// ── Brain (which brain answered the last reply) ───────────────────────────
+	// Only real reported data: the section exists solely when the runtime sent a
+	// routing decision for a reply — never invented (contract §1, ADR-0125).
+	if lastBrain != nil {
+		var lines []string
+		lines = append(lines, sectionHeader("◎", "Brain (last reply)"))
+		// formatBrainBadge owns placement mapping and flag precedence; take its
+		// parts. Neither the placement nor the short label ever contains " · ",
+		// so the first and last separators bound them even for odd model ids.
+		badge := formatBrainBadge(lastBrain)
+		placement, label := badge, ""
+		if i := strings.Index(badge, " · "); i >= 0 {
+			placement = badge[:i]
+		}
+		if i := strings.LastIndex(badge, " · "); i >= 0 {
+			label = badge[i+len(" · "):]
+		}
+		// Cloud (or anything not local) must stand out; local reads as OK.
+		placementLine := SidebarWarnStyle.Render("● " + placement)
+		if placement == "local" {
+			placementLine = SidebarOKStyle.Render("● " + placement)
+		}
+		lines = append(lines, "  "+placementLine)
+		lines = append(lines, kv("model", truncate(lastBrain.ModelID, width-10)))
+		if label != "" {
+			lines = append(lines, kv("route", truncate(label, width-10)))
 		}
 		sections = append(sections, strings.Join(lines, "\n"))
 	}
