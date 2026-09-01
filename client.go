@@ -229,6 +229,13 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 
 		var fullText strings.Builder
 		scanner := bufio.NewScanner(resp.Body)
+		// The runtime sends each SSE frame as one "data: {…}" line, and a frame can
+		// carry a very large chunk (the server generates the whole reply, then
+		// re-chunks it). bufio.Scanner's default 64KiB line cap made one long reply
+		// kill the stream mid-turn (ErrTooLong), which then cascaded into a blocking
+		// /ask retry against the runtime's one-turn guard. 10MiB of headroom covers
+		// any real text reply; a line beyond it still errors rather than hanging.
+		scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if !strings.HasPrefix(line, "data: ") {

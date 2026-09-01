@@ -138,6 +138,33 @@ func TestOpenAskStreamHappyPath(t *testing.T) {
 	}
 }
 
+// TestOpenAskStreamLongReply verifies a single SSE frame far larger than
+// bufio.Scanner's default 64KiB line cap arrives intact. Before the cap was
+// raised this errored mid-stream (bufio.ErrTooLong) and cascaded into a
+// blocking /ask retry that collided with the runtime's one-turn guard — a
+// long answer presented as a failure (Modernization 8).
+func TestOpenAskStreamLongReply(t *testing.T) {
+	long := strings.Repeat("a", 200*1024) // one frame, well past the 64KiB default cap
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\""+long+"\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true}\n\n")
+	}))
+	defer srv.Close()
+
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	full, err := drainStream(ch)
+	if err != nil {
+		t.Fatalf("long reply broke the stream: %v", err)
+	}
+	if full != long {
+		t.Fatalf("long reply arrived corrupted: got %d bytes, want %d", len(full), len(long))
+	}
+}
+
 // TestOpenAskStreamMalformedChunk verifies a non-JSON data line surfaces as a
 // stream error rather than silently corrupting the transcript.
 func TestOpenAskStreamMalformedChunk(t *testing.T) {

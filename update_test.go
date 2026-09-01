@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -139,5 +140,58 @@ func TestCtrlJInsertsNewlineAndGrows(t *testing.T) {
 	}
 	if m.input.Height() != 2 {
 		t.Fatalf("input height = %d, want 2 after one newline", m.input.Height())
+	}
+}
+
+// The mid-reply failure path (Modernization 8): once chunks have arrived the
+// runtime's one-turn guard owns the turn, so the client must NOT fall back to
+// the blocking /ask — that retry would 409 and present a mostly-delivered
+// answer as a failure. Instead it keeps the partial text, attributed to Billy,
+// with an honest unattributed interruption notice, and returns no command.
+func TestStreamErrAfterChunksKeepsPartialAndDoesNotRetry(t *testing.T) {
+	m := initialModel(nil)
+	m.isStreaming = true
+	m.streamBuffer = "partial reply text"
+
+	next, cmd := m.Update(StreamErrMsg{Prompt: "the prompt", Err: errors.New("token too long"), Gen: 0})
+	if cmd != nil {
+		t.Fatalf("expected no fallback command after chunks arrived, got one")
+	}
+	nm := next.(model)
+	if nm.thinking || nm.isStreaming {
+		t.Fatalf("turn should be finished: thinking=%v isStreaming=%v", nm.thinking, nm.isStreaming)
+	}
+	if nm.streamBuffer != "" {
+		t.Fatalf("streamBuffer not cleared: %q", nm.streamBuffer)
+	}
+	var gotPartial, gotNotice bool
+	for _, msg := range nm.messages {
+		if msg == "[Billy] partial reply text" {
+			gotPartial = true
+		}
+		if strings.HasPrefix(msg, "⚠️") && strings.Contains(msg, "interrupted") {
+			gotNotice = true
+		}
+	}
+	if !gotPartial {
+		t.Fatalf("partial text not kept as a Billy message: %q", nm.messages)
+	}
+	if !gotNotice {
+		t.Fatalf("no honest interruption notice recorded: %q", nm.messages)
+	}
+}
+
+// A stream that fails before ANY chunk arrived still falls back to the
+// blocking /ask — the pre-existing recovery for an unavailable stream
+// endpoint stays intact.
+func TestStreamErrBeforeChunksStillFallsBack(t *testing.T) {
+	m := initialModel(nil)
+	next, cmd := m.Update(StreamErrMsg{Prompt: "the prompt", Err: errors.New("connection refused"), Gen: 0})
+	if cmd == nil {
+		t.Fatalf("expected the /ask fallback command, got nil")
+	}
+	nm := next.(model)
+	if !nm.thinking {
+		t.Fatalf("expected thinking=true while the fallback runs")
 	}
 }

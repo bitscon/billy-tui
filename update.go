@@ -470,6 +470,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale: turn was abandoned (esc) or superseded
 		}
 		m.releaseStream()
+		partial := m.streamBuffer // chunks already received this turn, if any
 		m.streamBuffer = ""
 		m.isStreaming = false
 		m.liveMsg = ""
@@ -479,6 +480,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if errors.Is(msg.Err, errTurnInProgress) {
 			return m.handleTurnInProgress()
 		}
+		// The stream died mid-reply: the runtime accepted this turn and its
+		// one-turn guard is holding it, so a blocking /ask retry would collide
+		// and 409 — presenting a long, mostly-delivered answer as a failure.
+		// Keep what arrived, attributed to Billy (it is his text), and say
+		// honestly that it may be incomplete. No retry.
+		if partial != "" {
+			m.thinking = false
+			m.messages = append(m.messages, "[Billy] "+partial)
+			m.displayMessages = append(m.displayMessages,
+				BillyResponseStyle.Render("[Billy] ")+m.renderResponse(partial))
+			notice := "⚠️  Stream interrupted — the reply above may be incomplete (" + msg.Err.Error() + ")"
+			m.messages = append(m.messages, notice)
+			m.displayMessages = append(m.displayMessages, ErrorStyle.Render(notice))
+			m.lastLatency = time.Since(m.requestStarted)
+			m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
+			m.sidebar.lastTokens = len(partial) / 4
+			m.updateChatViewport()
+			return m, nil
+		}
 		if msg.Prompt == "" {
 			m.thinking = false
 			m.messages = append(m.messages, "⚠️  streaming error")
@@ -487,8 +507,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateChatViewport()
 			return m, nil
 		}
-		// /ask/stream failed for another reason — fall back to the blocking
-		// /ask path, keeping the same generation so its result stays current.
+		// /ask/stream failed before any chunk arrived (typically the endpoint
+		// is unavailable and the turn never started server-side), so fall back
+		// to the blocking /ask path, keeping the same generation so its result
+		// stays current. If the turn HAD started, the fallback's 409 is
+		// absorbed by the benign turn-in-progress handler above.
 		return m, ask(m.client, msg.Prompt, msg.Gen)
 
 	// ── 409 turn-in-progress (non-streaming path) ─────────────────────────────
