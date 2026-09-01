@@ -88,6 +88,15 @@ type model struct {
 	governanceAlertTicks int
 	lastGovRejected      int
 
+	// conductor state (wire contract v1). routingMode mirrors the runtime's
+	// routing_mode ("" = legacy runtime → today's pinned display). lastBrain is
+	// the most recent per-answer routing report; pendingApproval is a reply
+	// waiting on the operator's yes/no. Populated by the update handlers
+	// (another lane); nil/empty until then and on every legacy runtime.
+	routingMode     string
+	lastBrain       *BrainReport
+	pendingApproval *ApprovalRequest
+
 	// notifications
 	saveStatus      string
 	saveStatusTicks int
@@ -96,11 +105,39 @@ type model struct {
 	mdRenderer *glamour.TermRenderer
 }
 
+// --- conductor wire types (docs/CONDUCTOR-WIRE-CONTRACT.md §5, pinned) ---
+
+// BrainReport mirrors the subset of the runtime's BrainSelection trace the
+// client renders. Nil = no routing decision reported for this reply.
+type BrainReport struct {
+	Placement          string `json:"placement"` // "home" | "cloud"
+	Provider           string `json:"provider"`
+	ModelID            string `json:"model_id"`
+	Reason             string `json:"reason"`
+	Escalated          bool   `json:"escalated"`
+	PinnedHome         bool   `json:"pinned_home"`
+	DegradedForPrivacy bool   `json:"degraded_for_privacy"`
+	Failsafe           bool   `json:"failsafe"`
+	EffectiveTier      string `json:"effective_tier"`
+}
+
+// ApprovalRequest marks a reply that waits on the operator's yes/no.
+// Nil = nothing pending.
+type ApprovalRequest struct {
+	Pending bool   `json:"pending"`
+	ID      string `json:"id"`
+	Summary string `json:"summary"`
+	Command string `json:"command"`
+	Target  string `json:"target"`
+}
+
 // --- message types ---
 
 type responseMsg struct {
-	text string
-	Gen  int
+	text     string
+	Brain    *BrainReport     // nil on legacy runtimes / non-routed turns (contract §1)
+	Approval *ApprovalRequest // nil = nothing awaits the operator
+	Gen      int
 }
 type errMsg struct {
 	text string
@@ -139,6 +176,8 @@ type StreamChunkMsg struct {
 }
 type StreamDoneMsg struct {
 	FullText string
+	Brain    *BrainReport     // nil on legacy runtimes / non-routed turns (contract §1)
+	Approval *ApprovalRequest // nil = nothing awaits the operator
 	Gen      int
 }
 type StreamErrMsg struct {

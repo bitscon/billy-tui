@@ -48,19 +48,78 @@ func TestIs409TurnInProgress(t *testing.T) {
 	}
 }
 
-// TestDoAskSuccess verifies the happy path decodes the message field.
+// TestDoAskSuccess verifies the happy path decodes the message field, and that
+// a legacy body — no brain, no approval — yields exactly the pre-contract
+// result: same text, nil conductor pointers (contract §1 absence semantics).
 func TestDoAskSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{"message":"hello there"}`)
 	}))
 	defer srv.Close()
 
-	msg, err := newBillyClient(srv.URL).doAsk("hi")
+	res, err := newBillyClient(srv.URL).doAsk("hi")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if msg != "hello there" {
-		t.Fatalf("got %q, want %q", msg, "hello there")
+	if res.Message != "hello there" {
+		t.Fatalf("got %q, want %q", res.Message, "hello there")
+	}
+	if res.Brain != nil || res.Approval != nil {
+		t.Fatalf("legacy body must decode with nil Brain/Approval, got %+v / %+v", res.Brain, res.Approval)
+	}
+}
+
+// TestDoAskBrainApproval verifies a conductor-aware /ask reply delivers the
+// brain report and the approval request alongside the text (contract §3/§4).
+func TestDoAskBrainApproval(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{
+			"message": "I want to restart nginx. Reply yes to run it.",
+			"brain": {
+				"placement": "home",
+				"provider": "ollama",
+				"model_id": "qwen3.5:9b",
+				"reason": "routine turn; floor small; resolved at home",
+				"escalated": false,
+				"pinned_home": false,
+				"degraded_for_privacy": false,
+				"effective_tier": "small"
+			},
+			"approval": {
+				"pending": true,
+				"id": "appr-1",
+				"summary": "restart nginx",
+				"command": "systemctl restart nginx",
+				"target": "barn"
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	res, err := newBillyClient(srv.URL).doAsk("restart nginx")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Message != "I want to restart nginx. Reply yes to run it." {
+		t.Fatalf("message decoded wrong: %q", res.Message)
+	}
+	b := res.Brain
+	if b == nil {
+		t.Fatalf("expected a brain report, got nil")
+	}
+	if b.Placement != "home" || b.Provider != "ollama" || b.ModelID != "qwen3.5:9b" ||
+		b.Reason != "routine turn; floor small; resolved at home" ||
+		b.Escalated || b.PinnedHome || b.DegradedForPrivacy || b.Failsafe ||
+		b.EffectiveTier != "small" {
+		t.Fatalf("brain decoded wrong: %+v", b)
+	}
+	a := res.Approval
+	if a == nil {
+		t.Fatalf("expected an approval request, got nil")
+	}
+	if !a.Pending || a.ID != "appr-1" || a.Summary != "restart nginx" ||
+		a.Command != "systemctl restart nginx" || a.Target != "barn" {
+		t.Fatalf("approval decoded wrong: %+v", a)
 	}
 }
 
@@ -115,6 +174,20 @@ func drainStream(ch <-chan streamEvent) (string, error) {
 	return full, nil
 }
 
+// drainStreamDone consumes a stream channel until the Done event and returns it
+// whole — FullText plus any Brain/Approval — or the first error encountered.
+func drainStreamDone(ch <-chan streamEvent) (streamEvent, error) {
+	for ev := range ch {
+		if ev.Err != nil {
+			return ev, ev.Err
+		}
+		if ev.Done {
+			return ev, nil
+		}
+	}
+	return streamEvent{}, nil
+}
+
 // TestOpenAskStreamHappyPath verifies SSE chunks are parsed and assembled.
 func TestOpenAskStreamHappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +208,103 @@ func TestOpenAskStreamHappyPath(t *testing.T) {
 	}
 	if full != "Hello world" {
 		t.Fatalf("got %q, want %q", full, "Hello world")
+	}
+}
+
+// TestOpenAskStreamBrainOnDoneFrame verifies the contract's preferred shape:
+// the final done frame carries brain + approval, and both arrive on the Done
+// event alongside the assembled text (contract §3/§4).
+func TestOpenAskStreamBrainOnDoneFrame(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"Hello \",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"world\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true,"+
+			"\"brain\":{\"placement\":\"cloud\",\"provider\":\"openrouter\",\"model_id\":\"big-model\","+
+			"\"reason\":\"escalated: complex turn\",\"escalated\":true,\"pinned_home\":false,\"degraded_for_privacy\":false},"+
+			"\"approval\":{\"pending\":true,\"id\":\"appr-2\",\"summary\":\"reboot barn\"}}\n\n")
+	}))
+	defer srv.Close()
+
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	done, err := drainStreamDone(ch)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+	if done.FullText != "Hello world" {
+		t.Fatalf("FullText = %q, want %q", done.FullText, "Hello world")
+	}
+	if done.Brain == nil || done.Brain.Placement != "cloud" || done.Brain.ModelID != "big-model" || !done.Brain.Escalated {
+		t.Fatalf("brain not delivered from done frame: %+v", done.Brain)
+	}
+	if done.Approval == nil || !done.Approval.Pending || done.Approval.ID != "appr-2" || done.Approval.Summary != "reboot barn" {
+		t.Fatalf("approval not delivered from done frame: %+v", done.Approval)
+	}
+}
+
+// TestOpenAskStreamBrainOnEarlyFrame verifies the "any frame; first non-null
+// wins" rule (contract §3): a brain on an early chunk frame followed by a bare
+// done frame is still delivered on the Done event.
+func TestOpenAskStreamBrainOnEarlyFrame(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"early\",\"done\":false,"+
+			"\"brain\":{\"placement\":\"home\",\"provider\":\"ollama\",\"model_id\":\"qwen3.5:9b\","+
+			"\"reason\":\"first frame\",\"escalated\":false,\"pinned_home\":false,\"degraded_for_privacy\":false}}\n\n")
+		// A later frame with a DIFFERENT brain must lose to the first one.
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true,"+
+			"\"brain\":{\"placement\":\"cloud\",\"provider\":\"openrouter\",\"model_id\":\"other\","+
+			"\"reason\":\"second frame\",\"escalated\":true,\"pinned_home\":false,\"degraded_for_privacy\":false}}\n\n")
+	}))
+	defer srv.Close()
+
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	done, err := drainStreamDone(ch)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+	if done.FullText != "early" {
+		t.Fatalf("FullText = %q, want %q", done.FullText, "early")
+	}
+	if done.Brain == nil || done.Brain.Reason != "first frame" || done.Brain.Placement != "home" {
+		t.Fatalf("first non-nil brain must win, got %+v", done.Brain)
+	}
+	if done.Approval != nil {
+		t.Fatalf("no approval was sent, got %+v", done.Approval)
+	}
+}
+
+// TestOpenAskStreamLegacyNilBrain verifies a legacy stream — frames carrying
+// only chunk/done — behaves exactly as today: text assembled, nil Brain, nil
+// Approval on the Done event (contract §1 / degradation matrix row 1).
+func TestOpenAskStreamLegacyNilBrain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"legacy \",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"reply\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true}\n\n")
+	}))
+	defer srv.Close()
+
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected open error: %v", err)
+	}
+	done, err := drainStreamDone(ch)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+	if done.FullText != "legacy reply" {
+		t.Fatalf("FullText = %q, want %q", done.FullText, "legacy reply")
+	}
+	if done.Brain != nil || done.Approval != nil {
+		t.Fatalf("legacy stream must deliver nil Brain/Approval, got %+v / %+v", done.Brain, done.Approval)
 	}
 }
 
@@ -305,12 +475,12 @@ func TestUnixSocketTransportEndToEnd(t *testing.T) {
 		t.Fatalf("Health over socket: %v", err)
 	}
 
-	msg, err := c.doAsk("hi")
+	res, err := c.doAsk("hi")
 	if err != nil {
 		t.Fatalf("doAsk over socket: %v", err)
 	}
-	if msg != "socket ok" {
-		t.Fatalf("doAsk over socket = %q, want %q", msg, "socket ok")
+	if res.Message != "socket ok" {
+		t.Fatalf("doAsk over socket = %q, want %q", res.Message, "socket ok")
 	}
 
 	ch, err := c.openAskStream(context.Background(), "hi")
@@ -354,6 +524,37 @@ func TestLiveSocketSession(t *testing.T) {
 		t.Fatalf("LLMConfig over live socket reports unconfigured: %+v", cfg)
 	}
 	t.Logf("live socket OK — provider=%s model=%s", cfg.Provider, cfg.Model)
+}
+
+// TestLLMConfigRoutingMode verifies routing_mode decodes when present and
+// stays "" on a legacy config body — the "" sentinel is what keeps a legacy
+// runtime on today's pinned display (contract §2).
+func TestLLMConfigRoutingMode(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"auto", `{"provider":"ollama","model":"qwen3.5:9b","configured":true,"routing_mode":"auto"}`, "auto"},
+		{"pinned", `{"provider":"ollama","model":"qwen3.5:9b","configured":true,"routing_mode":"pinned"}`, "pinned"},
+		{"legacy absent", `{"provider":"ollama","model":"qwen3.5:9b","configured":true}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			cfg, err := newBillyClient(srv.URL).LLMConfig()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.RoutingMode != tc.want {
+				t.Fatalf("RoutingMode = %q, want %q", cfg.RoutingMode, tc.want)
+			}
+		})
+	}
 }
 
 // TestGetJSONNon200 verifies getJSON surfaces a non-200 as an error.

@@ -69,6 +69,10 @@ type streamEvent struct {
 	FullText string
 	Done     bool
 	Err      error
+	// Conductor surfaces (wire contract §3/§4), delivered on the Done event.
+	// Nil whenever the runtime sent none — the legacy stream shape.
+	Brain    *BrainReport
+	Approval *ApprovalRequest
 }
 
 // unixBaseURL is the fixed authority used for requests over the Unix socket.
@@ -149,43 +153,55 @@ func (c *billyClient) Health() error {
 	return nil
 }
 
+// askResult is everything one /ask reply can carry: the text plus the optional
+// conductor surfaces (wire contract §3/§4). Brain and Approval stay nil whenever
+// the runtime omits them — a legacy runtime, or a turn with no routing decision —
+// so a legacy body decodes to exactly the pre-contract result.
+type askResult struct {
+	Message  string
+	Brain    *BrainReport
+	Approval *ApprovalRequest
+}
+
 // doAsk performs a blocking (non-streaming) turn against /ask using the pooled
 // client. Used as the fallback when /ask/stream is unavailable.
-func (c *billyClient) doAsk(prompt string) (string, error) {
+func (c *billyClient) doAsk(prompt string) (askResult, error) {
 	body, _ := json.Marshal(map[string]string{
 		"prompt":     prompt,
 		"session_id": c.sessionID,
 	})
 	resp, err := c.http.Post(c.baseURL+"/ask", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return askResult{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		if is409TurnInProgress(resp) {
-			return "", errTurnInProgress
+			return askResult{}, errTurnInProgress
 		}
-		return "", fmt.Errorf("ask request failed: %d", resp.StatusCode)
+		return askResult{}, fmt.Errorf("ask request failed: %d", resp.StatusCode)
 	}
 	var result struct {
-		Message string `json:"message"`
+		Message  string           `json:"message"`
+		Brain    *BrainReport     `json:"brain"`
+		Approval *ApprovalRequest `json:"approval"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return askResult{}, err
 	}
-	return result.Message, nil
+	return askResult{Message: result.Message, Brain: result.Brain, Approval: result.Approval}, nil
 }
 
 func ask(c *billyClient, prompt string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		message, err := c.doAsk(prompt)
+		res, err := c.doAsk(prompt)
 		if err != nil {
 			if errors.Is(err, errTurnInProgress) {
 				return turnInProgressMsg{Gen: gen}
 			}
 			return errMsg{text: "⚠️  " + err.Error(), Gen: gen}
 		}
-		return responseMsg{text: message, Gen: gen}
+		return responseMsg{text: res.Message, Brain: res.Brain, Approval: res.Approval, Gen: gen}
 	}
 }
 
@@ -228,6 +244,12 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 		defer resp.Body.Close()
 
 		var fullText strings.Builder
+		// The contract lets brain/approval ride ANY frame (the runtime should use
+		// the final done frame, but must not be required to): remember the first
+		// non-nil of each and hand both to the Done event, whichever frame they
+		// arrived on (contract §3 — first non-null wins).
+		var brain *BrainReport
+		var approval *ApprovalRequest
 		scanner := bufio.NewScanner(resp.Body)
 		// The runtime sends each SSE frame as one "data: {…}" line, and a frame can
 		// carry a very large chunk (the server generates the whole reply, then
@@ -248,20 +270,28 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 			}
 
 			var payload struct {
-				Chunk string `json:"chunk"`
-				Done  bool   `json:"done"`
+				Chunk    string           `json:"chunk"`
+				Done     bool             `json:"done"`
+				Brain    *BrainReport     `json:"brain"`
+				Approval *ApprovalRequest `json:"approval"`
 			}
 			if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
 				events <- streamEvent{Err: err, Done: true}
 				return
 			}
 
+			if brain == nil {
+				brain = payload.Brain
+			}
+			if approval == nil {
+				approval = payload.Approval
+			}
 			if payload.Chunk != "" {
 				fullText.WriteString(payload.Chunk)
 				events <- streamEvent{Chunk: payload.Chunk}
 			}
 			if payload.Done {
-				events <- streamEvent{Done: true, FullText: fullText.String()}
+				events <- streamEvent{Done: true, FullText: fullText.String(), Brain: brain, Approval: approval}
 				return
 			}
 		}
@@ -281,7 +311,7 @@ func nextStreamMessage(events <-chan streamEvent, prompt string, gen int) tea.Ms
 		return StreamErrMsg{Prompt: prompt, Err: event.Err, Gen: gen}
 	}
 	if event.Done {
-		return StreamDoneMsg{FullText: event.FullText, Gen: gen}
+		return StreamDoneMsg{FullText: event.FullText, Brain: event.Brain, Approval: event.Approval, Gen: gen}
 	}
 	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, Gen: gen, events: events}
 }
@@ -311,6 +341,11 @@ type LLMConfig struct {
 	Model      string `json:"model"`
 	BaseURL    string `json:"base_url"`
 	Configured bool   `json:"configured"`
+	// RoutingMode is "auto" | "pinned" on a conductor-aware runtime; "" means a
+	// legacy runtime that never sends it → behave exactly as today (contract §2).
+	// Under "auto" the provider/model above is the pin/home config, not
+	// necessarily what answers a given turn.
+	RoutingMode string `json:"routing_mode"`
 }
 
 // GuidanceDecision is one entry from GET /reconciliation/recent.
