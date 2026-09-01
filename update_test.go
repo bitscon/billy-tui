@@ -195,3 +195,316 @@ func TestStreamErrBeforeChunksStillFallsBack(t *testing.T) {
 		t.Fatalf("expected thinking=true while the fallback runs")
 	}
 }
+
+// ── conductor surfaces: per-reply brain record (Modernization 3) ─────────────
+
+// testBrain is a representative routed-turn report for the transcript tests.
+var testBrain = &BrainReport{
+	Placement: "home",
+	Provider:  "ollama",
+	ModelID:   "qwen3.5:9b",
+	Reason:    "routine turn; floor small; resolved at home",
+}
+
+// A non-streaming reply that carries a brain report lands the record right
+// after the Billy line — as its own unattributed [Brain] line, dim in the
+// display — and updates lastBrain.
+func TestResponseMsgAppendsBrainRecord(t *testing.T) {
+	m := initialModel(nil)
+	next, _ := m.Update(responseMsg{text: "hello there", Brain: testBrain, Gen: 0})
+	nm := next.(model)
+
+	if nm.lastBrain != testBrain {
+		t.Fatalf("lastBrain not set from the reply's report")
+	}
+	want := brainRecordLine(testBrain)
+	if len(nm.messages) != 2 || nm.messages[0] != "[Billy] hello there" || nm.messages[1] != want {
+		t.Fatalf("messages = %q, want Billy reply then %q", nm.messages, want)
+	}
+	if !strings.HasPrefix(nm.messages[1], brainLinePrefix) {
+		t.Fatalf("brain record lost its prefix: %q", nm.messages[1])
+	}
+	if got := nm.displayMessages[len(nm.displayMessages)-1]; got != DimStyle.Render(want) {
+		t.Fatalf("brain record displayed as %q, want dim %q", got, DimStyle.Render(want))
+	}
+}
+
+// The streamed path records the brain report the same way the blocking path
+// does, so both transports leave identical transcripts for the same turn.
+func TestStreamDoneMsgAppendsBrainRecord(t *testing.T) {
+	m := initialModel(nil)
+	next, _ := m.Update(StreamDoneMsg{FullText: "streamed reply", Brain: testBrain, Gen: 0})
+	nm := next.(model)
+
+	if nm.lastBrain != testBrain {
+		t.Fatalf("lastBrain not set from the stream's report")
+	}
+	want := brainRecordLine(testBrain)
+	if len(nm.messages) != 2 || nm.messages[0] != "[Billy] streamed reply" || nm.messages[1] != want {
+		t.Fatalf("messages = %q, want Billy reply then %q", nm.messages, want)
+	}
+}
+
+// A reply with no brain report (legacy runtime, unrouted turn) must leave the
+// transcript exactly as today — no invented record (contract §1/§6).
+func TestNilBrainLeavesTranscriptUnchanged(t *testing.T) {
+	m := initialModel(nil)
+	next, _ := m.Update(responseMsg{text: "plain reply", Gen: 0})
+	nm := next.(model)
+	if len(nm.messages) != 1 || nm.messages[0] != "[Billy] plain reply" {
+		t.Fatalf("nil-Brain responseMsg altered the transcript: %q", nm.messages)
+	}
+	if nm.lastBrain != nil {
+		t.Fatalf("lastBrain invented without a report")
+	}
+
+	m2 := initialModel(nil)
+	next2, _ := m2.Update(StreamDoneMsg{FullText: "plain streamed", Gen: 0})
+	nm2 := next2.(model)
+	if len(nm2.messages) != 1 || nm2.messages[0] != "[Billy] plain streamed" {
+		t.Fatalf("nil-Brain StreamDoneMsg altered the transcript: %q", nm2.messages)
+	}
+}
+
+// On a resize re-flow, [Brain] lines must re-render dim — not fall into the
+// error-styled default — and must never gain a Billy attribution.
+func TestRebuildDisplayMessagesStylesBrainDim(t *testing.T) {
+	m := initialModel(nil)
+	line := brainRecordLine(testBrain)
+	m.messages = []string{"[You] hi", "[Billy] hello", line}
+	m.rebuildDisplayMessages()
+
+	if len(m.displayMessages) != 3 {
+		t.Fatalf("rebuilt %d display lines, want 3", len(m.displayMessages))
+	}
+	if got, want := m.displayMessages[2], DimStyle.Render(line); got != want {
+		t.Fatalf("brain line rebuilt as %q, want dim %q", got, want)
+	}
+	if strings.Contains(m.displayMessages[2], "[Billy]") {
+		t.Fatalf("brain line attributed to Billy on rebuild: %q", m.displayMessages[2])
+	}
+}
+
+// ── conductor surfaces: approval affordance (Modernization 4) ────────────────
+
+func testApproval() *ApprovalRequest {
+	return &ApprovalRequest{
+		Pending: true,
+		ID:      "appr-1",
+		Summary: "restart nginx",
+		Command: "systemctl restart nginx",
+		Target:  "barn",
+	}
+}
+
+// A reply that awaits the operator sets pendingApproval and appends an
+// unattributed prompt block showing what will run, against which server, and
+// how to answer. A non-pending approval object changes nothing.
+func TestApprovalPendingSetsStateAndRendersBlock(t *testing.T) {
+	m := initialModel(nil)
+	next, _ := m.Update(responseMsg{text: "Reply yes to run it.", Approval: testApproval(), Gen: 0})
+	nm := next.(model)
+
+	if nm.pendingApproval == nil || nm.pendingApproval.ID != "appr-1" {
+		t.Fatalf("pendingApproval not set from the reply")
+	}
+	block := nm.messages[len(nm.messages)-1]
+	for _, want := range []string{"restart nginx", "systemctl restart nginx", "barn", "press y to approve, n to decline"} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("approval block missing %q:\n%s", want, block)
+		}
+	}
+	if strings.HasPrefix(block, "[Billy] ") || strings.HasPrefix(block, "[You] ") {
+		t.Fatalf("approval block must be unattributed: %q", block)
+	}
+
+	m2 := initialModel(nil)
+	next2, _ := m2.Update(responseMsg{text: "done", Approval: &ApprovalRequest{Pending: false, ID: "appr-2"}, Gen: 0})
+	nm2 := next2.(model)
+	if nm2.pendingApproval != nil || len(nm2.messages) != 1 {
+		t.Fatalf("non-pending approval must change nothing: pending=%v messages=%q", nm2.pendingApproval, nm2.messages)
+	}
+}
+
+// With an approval pending, an empty input, and no turn in flight, a bare y/n
+// answers through the same path as a typed submission: [You] line, cleared
+// pending state, and a real turn command.
+func TestApprovalQuickKeysSubmitYesNo(t *testing.T) {
+	for key, want := range map[string]string{"y": "yes", "n": "no"} {
+		m := initialModel(nil)
+		m.messages = []string{"[Billy] Reply yes to run it."}
+		m.pendingApproval = testApproval()
+
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		nm := next.(model)
+		if cmd == nil {
+			t.Fatalf("%q should submit a turn command", key)
+		}
+		if got := nm.messages[len(nm.messages)-1]; got != "[You] "+want {
+			t.Fatalf("%q transcript line = %q, want %q", key, got, "[You] "+want)
+		}
+		if nm.pendingApproval != nil {
+			t.Fatalf("submission must clear pendingApproval")
+		}
+		if !nm.thinking {
+			t.Fatalf("%q should start a real turn", key)
+		}
+	}
+}
+
+// Without a pending approval y is just a letter; with one pending but text
+// already in the input it is still just a letter — no hidden submissions.
+func TestYTypesNormallyWhenNotAnAnswer(t *testing.T) {
+	m := initialModel(nil)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	nm := next.(model)
+	if nm.input.Value() != "y" {
+		t.Fatalf("input = %q, want %q (typed normally)", nm.input.Value(), "y")
+	}
+	if len(nm.messages) != 0 {
+		t.Fatalf("no submission expected: %q", nm.messages)
+	}
+
+	m2 := initialModel(nil)
+	m2.pendingApproval = testApproval()
+	m2.input.SetValue("h")
+	next2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	nm2 := next2.(model)
+	if nm2.input.Value() != "hy" {
+		t.Fatalf("input = %q, want %q (typing continues)", nm2.input.Value(), "hy")
+	}
+	if nm2.pendingApproval == nil {
+		t.Fatalf("typing must not resolve the approval")
+	}
+}
+
+// ── queue instead of refusing (Modernization 4) ──────────────────────────────
+
+// Enter while a turn is in flight queues the prompt instead of refusing it:
+// input cleared, nothing sent, status says so. A second enter-while-busy
+// replaces the queued prompt and says that too.
+func TestEnterWhileBusyQueuesPrompt(t *testing.T) {
+	m := initialModel(nil)
+	m.thinking = true
+	m.input.SetValue("yes")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("queueing must not send a turn")
+	}
+	if nm.queuedPrompt != "yes" {
+		t.Fatalf("queuedPrompt = %q, want %q", nm.queuedPrompt, "yes")
+	}
+	if nm.input.Value() != "" {
+		t.Fatalf("input not cleared after queueing: %q", nm.input.Value())
+	}
+	if len(nm.messages) != 0 {
+		t.Fatalf("nothing may reach the transcript at queue time: %q", nm.messages)
+	}
+	if !strings.Contains(nm.saveStatus, "Queued") {
+		t.Fatalf("status should say the prompt queued: %q", nm.saveStatus)
+	}
+
+	nm.input.SetValue("no wait, no")
+	next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm2 := next2.(model)
+	if nm2.queuedPrompt != "no wait, no" {
+		t.Fatalf("second enter should replace the queue: %q", nm2.queuedPrompt)
+	}
+	if !strings.Contains(nm2.saveStatus, "replaced") {
+		t.Fatalf("status should say the queue was replaced: %q", nm2.saveStatus)
+	}
+}
+
+// A queued prompt auto-sends when the turn completes cleanly — on both the
+// streamed and blocking completion paths — as a full submission: [You] line
+// after Billy's reply, a new turn command, and an emptied queue.
+func TestQueuedPromptAutoSendsOnCompletion(t *testing.T) {
+	m := initialModel(nil)
+	m.isStreaming = true
+	m.queuedPrompt = "queued question"
+
+	next, cmd := m.Update(StreamDoneMsg{FullText: "done reply", Gen: 0})
+	nm := next.(model)
+	if cmd == nil {
+		t.Fatalf("queued prompt should auto-send on StreamDoneMsg")
+	}
+	if nm.queuedPrompt != "" {
+		t.Fatalf("queue not emptied: %q", nm.queuedPrompt)
+	}
+	if len(nm.messages) != 2 || nm.messages[0] != "[Billy] done reply" || nm.messages[1] != "[You] queued question" {
+		t.Fatalf("messages = %q, want Billy reply then the queued [You] line", nm.messages)
+	}
+	if !nm.thinking {
+		t.Fatalf("auto-send should start a real turn")
+	}
+
+	m2 := initialModel(nil)
+	m2.thinking = true
+	m2.queuedPrompt = "second queued"
+	next2, cmd2 := m2.Update(responseMsg{text: "ok", Gen: 0})
+	nm2 := next2.(model)
+	if cmd2 == nil || nm2.messages[len(nm2.messages)-1] != "[You] second queued" {
+		t.Fatalf("queued prompt should auto-send on responseMsg too: %q", nm2.messages)
+	}
+}
+
+// A failed turn must NOT fire the queued prompt into the wreckage: it moves
+// back into the (empty) input instead — winning the box over the failed
+// prompt, which stays reachable via ↑ history — and nothing is sent.
+func TestQueuedPromptNotSentOnErrMsg(t *testing.T) {
+	m := initialModel(nil)
+	m.thinking = true
+	m.lastPrompt = "the failed prompt"
+	m.queuedPrompt = "queued text"
+
+	next, cmd := m.Update(errMsg{text: "⚠️  boom", Gen: 0})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("a failed turn must not auto-send the queue")
+	}
+	if nm.queuedPrompt != "" {
+		t.Fatalf("queue should be drained into the input: %q", nm.queuedPrompt)
+	}
+	if nm.input.Value() != "queued text" {
+		t.Fatalf("input = %q, want the queued text (queued wins over the failed prompt)", nm.input.Value())
+	}
+	for _, msg := range nm.messages {
+		if msg == "[You] queued text" {
+			t.Fatalf("queued text must not reach the transcript on failure")
+		}
+	}
+}
+
+// ── routing-mode glue (Modernization 2) ──────────────────────────────────────
+
+// The sidebar-tick glue (routingMode from GET /api/v1/llm/config) needs a live
+// client — the tick handler dereferences it for four endpoints — so the
+// initialModel(nil) pattern cannot reach it; the decode itself is covered by
+// TestLLMConfigRoutingMode. What IS reachable is the modelSetMsg half: a switch
+// under auto routing must warn that it only set the pin (contract §7), a
+// legacy/pinned runtime must not warn, and neither may touch routingMode (the
+// poll is the authority).
+func TestModelSetMsgAutoRoutingCaution(t *testing.T) {
+	m := initialModel(nil)
+	m.routingMode = "auto"
+	next, _ := m.Update(modelSetMsg{provider: "ollama", model: "qwen3.5:9b"})
+	nm := next.(model)
+	if !strings.Contains(nm.saveStatus, "auto routing is on") || !strings.Contains(nm.saveStatus, "pin") {
+		t.Fatalf("auto-mode switch status missing the pin caution: %q", nm.saveStatus)
+	}
+	if nm.routingMode != "auto" {
+		t.Fatalf("modelSetMsg must not touch routingMode: %q", nm.routingMode)
+	}
+
+	m2 := initialModel(nil) // legacy runtime: routingMode ""
+	next2, _ := m2.Update(modelSetMsg{provider: "ollama", model: "qwen3.5:9b"})
+	nm2 := next2.(model)
+	if strings.Contains(nm2.saveStatus, "auto routing") {
+		t.Fatalf("legacy runtime must keep today's plain status: %q", nm2.saveStatus)
+	}
+	if nm2.routingMode != "" {
+		t.Fatalf("modelSetMsg must not invent a routing mode: %q", nm2.routingMode)
+	}
+}

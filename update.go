@@ -69,12 +69,15 @@ func (m *model) updateChatViewport() {
 
 // clearChat resets the conversation surface — both the raw and displayed
 // message logs and any in-flight streaming buffer — then refreshes the
-// viewport. Shared by the ":clear" command and the ctrl+l shortcut.
+// viewport. Shared by the ":clear" command and the ctrl+l shortcut. A pending
+// approval dies with its transcript: its prompt block is gone, so the y/n
+// quick keys must not keep answering it invisibly.
 func (m *model) clearChat() {
 	m.messages = []string{}
 	m.displayMessages = []string{}
 	m.liveMsg = ""
 	m.streamBuffer = ""
+	m.pendingApproval = nil
 	m.updateChatViewport()
 }
 
@@ -108,6 +111,10 @@ func (m *model) rebuildDisplayMessages() {
 			rebuilt = append(rebuilt, UserInputStyle.Render(raw))
 		case strings.HasPrefix(raw, "[Billy] "):
 			rebuilt = append(rebuilt, BillyResponseStyle.Render("[Billy] ")+m.renderResponse(strings.TrimPrefix(raw, "[Billy] ")))
+		case strings.HasPrefix(raw, brainLinePrefix):
+			// Per-turn brain records re-render dim, matching their first append —
+			// they are routing bookkeeping, not errors, and never Billy's voice.
+			rebuilt = append(rebuilt, DimStyle.Render(raw))
 		default:
 			// TUI notices (governance shield, ⚠️ health errors) and anything not
 			// explicitly a [You]/[Billy] line render error-styled, never attributed.
@@ -125,6 +132,111 @@ func (m *model) restoreFailedPrompt() {
 		m.input.SetValue(m.lastPrompt)
 		m.refreshInputHeight() // a restored multi-line prompt re-grows the box
 	}
+}
+
+// restoreQueuedPrompt moves the queued prompt back into an empty input when a
+// turn ends without a clean completion — queued text auto-sends only after a
+// success, and must never be dropped silently on a failure. Call it BEFORE
+// restoreFailedPrompt on failure paths: the queued text is the operator's most
+// recent intent, so it wins the input box (the failed prompt stays reachable
+// via ↑ history). If the operator has since typed something, the queue is left
+// standing rather than clobbering their draft — it still sends after the next
+// completed turn.
+func (m *model) restoreQueuedPrompt() {
+	if m.queuedPrompt == "" || m.input.Value() != "" {
+		return
+	}
+	m.input.SetValue(m.queuedPrompt)
+	m.refreshInputHeight() // a restored multi-line prompt re-grows the box
+	m.queuedPrompt = ""
+}
+
+// approvalPromptBlock renders the unmissable prompt for a reply that awaits the
+// operator's yes/no (wire contract §4): what will run, against which server, and
+// how to answer. Deliberately unattributed — no "[You]"/"[Billy]" prefix — so no
+// capture path ever credits it to Billy; rebuildDisplayMessages re-renders it
+// via the loud default branch. Command and Target lines appear only when the
+// runtime sent them.
+func approvalPromptBlock(a *ApprovalRequest) string {
+	if a == nil {
+		return ""
+	}
+	block := "⚠️  APPROVAL NEEDED — " + a.Summary
+	if a.Command != "" {
+		block += "\n    will run: " + a.Command
+	}
+	if a.Target != "" {
+		block += "\n    against:  " + a.Target
+	}
+	block += "\n    press y to approve, n to decline — or type a reply"
+	return block
+}
+
+// recordConductorSurfaces lands a completed reply's conductor surfaces in the
+// transcript: the per-turn brain record (dim, contract §3) and, when a reply
+// awaits the operator, the approval prompt (loud, contract §4). Both lines are
+// unattributed — the TUI must never speak AS Billy, and the clean :export drops
+// them while the ctrl+s debug capture keeps them as system notes. Nil fields
+// (legacy runtime, unrouted turn) leave the transcript untouched (contract §6).
+func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRequest) {
+	if brain != nil {
+		m.lastBrain = brain
+		line := brainRecordLine(brain)
+		m.messages = append(m.messages, line)
+		m.displayMessages = append(m.displayMessages, DimStyle.Render(line))
+	}
+	if approval != nil && approval.Pending {
+		m.pendingApproval = approval
+		block := approvalPromptBlock(approval)
+		m.messages = append(m.messages, block)
+		m.displayMessages = append(m.displayMessages, ErrorStyle.Render(block))
+	}
+}
+
+// submitPrompt sends text to Billy exactly as an enter-key submission does —
+// transcript "[You]" line, history push, generation bump, stream call — so the
+// enter key, the y/n approval quick keys, and the queued-prompt auto-send all
+// produce identical turns. It does not touch the input box: the caller clears
+// it when the text came from there, and an auto-send must not clobber a draft
+// the operator is typing. Any submission resolves a pending approval — the
+// reply IS the answer, over the unchanged /ask path (contract §4).
+func (m *model) submitPrompt(text string) tea.Cmd {
+	// push to history ring buffer
+	m.inputHistory = append(m.inputHistory, text)
+	if len(m.inputHistory) > 50 {
+		m.inputHistory = m.inputHistory[1:]
+	}
+	m.historyIdx = -1
+	m.draftInput = ""
+
+	// Clear the startup UI hint (a non-Billy "— Say hi to start. —"
+	// line lives only in displayMessages while messages is empty)
+	// the moment the real conversation begins.
+	if len(m.messages) == 0 {
+		m.displayMessages = nil
+	}
+
+	m.messages = append(m.messages, "[You] "+text)
+	m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+text))
+	m.lastPrompt = text
+	m.pendingApproval = nil
+	// New turn: bump the generation and open a cancelable, generously
+	// bounded context. thinking=true with isStreaming=false lets the
+	// animated "Billy is thinking…" spinner show until the first chunk
+	// arrives (StreamChunkMsg flips isStreaming on).
+	m.releaseStream()
+	m.streamGen++
+	gen := m.streamGen
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	m.streamCancel = cancel
+	m.thinking = true
+	m.isStreaming = false
+	m.streamBuffer = ""
+	m.streamTokens = 0
+	m.requestStarted = time.Now()
+	m.liveMsg = ""
+	m.updateChatViewport()
+	return askStream(ctx, m.client, text, gen)
 }
 
 // desiredInputRows returns how many rows the input box should occupy: it grows
@@ -252,6 +364,9 @@ func (m *model) execCommand(raw string) tea.Cmd {
 	case "session":
 		if len(parts) > 1 && parts[1] == "new" {
 			m.client.sessionID = fmt.Sprintf("tui-%d", time.Now().UnixNano())
+			// A pending approval belongs to the old session; the new one must
+			// not start with y/n silently answering a question it never asked.
+			m.pendingApproval = nil
 			short := truncate(m.client.sessionID, 20)
 			m.saveStatus = "✓ New session: " + short
 			m.saveStatusTicks = 4
@@ -274,6 +389,7 @@ func (m *model) handleTurnInProgress() (tea.Model, tea.Cmd) {
 	m.isStreaming = false
 	m.liveMsg = ""
 	m.streamBuffer = ""
+	m.restoreQueuedPrompt() // queued text wins the input box over the failed prompt
 	m.restoreFailedPrompt()
 	m.saveStatus = turnInProgressMessage
 	m.saveStatusTicks = 4
@@ -390,6 +506,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.saveStatus = "⚠️  switch failed: " + msg.err.Error()
 		} else {
 			m.saveStatus = "✓ Switched to " + msg.model + " (" + msg.provider + ")"
+			// routingMode is deliberately untouched here — the config GET on the
+			// next sidebar poll is the authority. But under auto routing a switch
+			// only sets the pin/home config, which the conductor may override on
+			// the very next turn (contract §7) — say so rather than implying the
+			// picked model now answers every turn.
+			if m.routingMode == "auto" {
+				m.saveStatus += " — caution: auto routing is on, this set the pin; the conductor may pick another brain next turn"
+			}
 			m.sidebar.model = msg.model
 			m.sidebar.provider = msg.provider
 		}
@@ -405,12 +529,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rendered := m.renderResponse(msg.text)
 		m.messages = append(m.messages, "[Billy] "+msg.text)
 		m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
+		m.recordConductorSurfaces(msg.Brain, msg.Approval)
 		m.thinking = false
 		m.liveMsg = ""
 		m.lastLatency = time.Since(m.requestStarted)
 		m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
 		m.sidebar.lastTokens = len(msg.text) / 4
 		m.updateChatViewport()
+		// A clean completion releases the queued prompt (enter-while-busy) as a
+		// real submission — the promise made when it was queued.
+		if q := m.queuedPrompt; q != "" {
+			m.queuedPrompt = ""
+			return m, m.submitPrompt(q)
+		}
 		return m, nil
 
 	case errMsg:
@@ -423,6 +554,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinking = false
 		m.isStreaming = false
 		m.liveMsg = ""
+		// Failed turn: never auto-send the queued prompt into the wreckage —
+		// hand it (or, failing that, the failed prompt) back to the input.
+		m.restoreQueuedPrompt()
 		m.restoreFailedPrompt()
 		m.updateChatViewport()
 		return m, nil
@@ -456,6 +590,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// report the same count for the same reply.
 			m.sidebar.lastTokens = len(msg.FullText) / 4
 		}
+		m.recordConductorSurfaces(msg.Brain, msg.Approval)
 		m.liveMsg = ""
 		m.streamBuffer = ""
 		m.isStreaming = false
@@ -463,6 +598,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastLatency = time.Since(m.requestStarted)
 		m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
 		m.updateChatViewport()
+		// A clean completion releases the queued prompt (enter-while-busy) as a
+		// real submission — the promise made when it was queued.
+		if q := m.queuedPrompt; q != "" {
+			m.queuedPrompt = ""
+			return m, m.submitPrompt(q)
+		}
 		return m, nil
 
 	case StreamErrMsg:
@@ -496,6 +637,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastLatency = time.Since(m.requestStarted)
 			m.sidebar.lastLatency = fmt.Sprintf("%.1fs", m.lastLatency.Seconds())
 			m.sidebar.lastTokens = len(partial) / 4
+			// Not a clean completion: a queued prompt must not fire against a
+			// possibly-incomplete reply — hand it back to the input instead.
+			m.restoreQueuedPrompt()
 			m.updateChatViewport()
 			return m, nil
 		}
@@ -503,6 +647,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.thinking = false
 			m.messages = append(m.messages, "⚠️  streaming error")
 			m.displayMessages = append(m.displayMessages, ErrorStyle.Render("⚠️  streaming error"))
+			m.restoreQueuedPrompt() // queued text wins the input box over the failed prompt
 			m.restoreFailedPrompt()
 			m.updateChatViewport()
 			return m, nil
@@ -563,6 +708,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cfg, err := m.client.LLMConfig(); err == nil {
 			m.sidebar.provider = cfg.Provider
 			m.sidebar.model = cfg.Model
+			// The GET is authoritative for routing mode, on every poll — "" is a
+			// legacy runtime and must read as one (contract §2/§6), so no
+			// stale "auto" may survive a runtime downgrade.
+			m.routingMode = cfg.RoutingMode
 		}
 
 		// Latest governance denial reason code (most recent by timestamp).
@@ -659,6 +808,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isStreaming = false
 			m.liveMsg = ""
 			m.streamBuffer = ""
+			// An abandoned turn never completes, so its queued prompt would never
+			// auto-send — hand it back (it wins the input box over the abandoned
+			// prompt, which stays reachable via ↑ history).
+			m.restoreQueuedPrompt()
 			m.restoreFailedPrompt()
 			m.saveStatus = "Abandoned — Billy may still be finishing server-side."
 			m.saveStatusTicks = 4
@@ -723,54 +876,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// ── input-pane keys ──
 		if m.focusedPane == paneInput {
+			// ── approval quick keys ──
+			// A pending approval answers to a bare y/n — but only when they can
+			// mean nothing else: input empty (otherwise they are typing), no turn
+			// in flight. Both travel the same path as a typed "yes"/"no" — the
+			// reply channel is unchanged chat text (contract §4).
+			if m.pendingApproval != nil && !m.thinking && !m.isStreaming && m.input.Value() == "" {
+				switch msg.String() {
+				case "y":
+					return m, m.submitPrompt("yes")
+				case "n":
+					return m, m.submitPrompt("no")
+				}
+			}
 			switch msg.String() {
 			case "enter":
 				if m.isStreaming || m.thinking {
-					m.saveStatus = "Wait for current response…"
-					m.saveStatusTicks = 2
+					// Queue instead of refusing: a reply typed while Billy is
+					// finishing — e.g. a fast "yes" to an approval — must reach
+					// him, not die in the input box. One slot; a newer
+					// enter-while-busy replaces it, and says so.
+					if m.input.Value() == "" {
+						return m, nil
+					}
+					replaced := m.queuedPrompt != ""
+					m.queuedPrompt = m.input.Value()
+					m.input.Reset()
+					m.refreshInputHeight() // collapse a multi-line box back to one row
+					m.saveStatus = "⏳ Queued — sends when Billy finishes"
+					if replaced {
+						m.saveStatus = "⏳ Queued (replaced the earlier queued prompt) — sends when Billy finishes"
+					}
+					m.saveStatusTicks = 4
 					return m, nil
 				}
 				if m.input.Value() == "" {
 					return m, nil
 				}
 				userMsg := m.input.Value()
-				// push to history ring buffer
-				m.inputHistory = append(m.inputHistory, userMsg)
-				if len(m.inputHistory) > 50 {
-					m.inputHistory = m.inputHistory[1:]
-				}
-				m.historyIdx = -1
-				m.draftInput = ""
-
-				// Clear the startup UI hint (a non-Billy "— Say hi to start. —"
-				// line lives only in displayMessages while messages is empty)
-				// the moment the real conversation begins.
-				if len(m.messages) == 0 {
-					m.displayMessages = nil
-				}
-
-				m.messages = append(m.messages, "[You] "+userMsg)
-				m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+userMsg))
 				m.input.Reset()
 				m.refreshInputHeight() // collapse a multi-line box back to one row
-				m.lastPrompt = userMsg
-				// New turn: bump the generation and open a cancelable, generously
-				// bounded context. thinking=true with isStreaming=false lets the
-				// animated "Billy is thinking…" spinner show until the first chunk
-				// arrives (StreamChunkMsg flips isStreaming on).
-				m.releaseStream()
-				m.streamGen++
-				gen := m.streamGen
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				m.streamCancel = cancel
-				m.thinking = true
-				m.isStreaming = false
-				m.streamBuffer = ""
-				m.streamTokens = 0
-				m.requestStarted = time.Now()
-				m.liveMsg = ""
-				m.updateChatViewport()
-				return m, askStream(ctx, m.client, userMsg, gen)
+				return m, m.submitPrompt(userMsg)
 
 			case "up":
 				if len(m.inputHistory) == 0 {
