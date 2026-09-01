@@ -97,6 +97,13 @@ type model struct {
 	lastBrain       *BrainReport
 	pendingApproval *ApprovalRequest
 
+	// queuedPrompt holds one prompt typed while a turn was still in flight
+	// (enter-while-busy). It auto-sends when the turn completes cleanly; on any
+	// failure path it is moved back into the input instead, so a reply typed
+	// early — e.g. a fast "yes" to an approval — is never dropped silently.
+	// At most one prompt queues; a newer enter-while-busy replaces it.
+	queuedPrompt string
+
 	// notifications
 	saveStatus      string
 	saveStatusTicks int

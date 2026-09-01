@@ -43,7 +43,7 @@ model.go      — model struct and message types
 update.go     — Elm Update: all event handlers
 view.go       — Elm View: layout rendering and Markdown helper
 styles.go     — Lipgloss color palette and style definitions
-client.go     — HTTP client for billy-runtime /ask, /health, /runtime/status, /telemetry/events
+client.go     — HTTP client for billy-runtime: /health, /ask, /ask/stream, /runtime/status, /reconciliation/recent, /api/v1/llm/config, /api/v1/llm/models, /api/v1/execution/jobs/active
 sidebar.go    — sidebar state struct and renderSidebar() function
 Makefile      — build, run, test targets
 bin/          — compiled binary output (gitignored)

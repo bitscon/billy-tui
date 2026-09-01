@@ -140,3 +140,48 @@ func TestBuildMarkdownDoesNotLabelNoticeAsBilly(t *testing.T) {
 		t.Fatalf("real Billy reply missing or mislabeled:\n%s", out)
 	}
 }
+
+// A ctrl+s debug capture of a routed turn must contain the [Brain] record —
+// that is the whole point of the record (Modernization 7) — as an italic
+// system note, never attributed to Billy or the operator.
+func TestBuildMarkdownKeepsBrainLineUnattributed(t *testing.T) {
+	brainLine := brainRecordLine(&BrainReport{
+		Placement: "home", Provider: "ollama", ModelID: "qwen3.5:9b",
+		Reason: "routine turn; floor small",
+	})
+	out := buildMarkdown([]string{"[You] hi", "[Billy] hello", brainLine}, "sess-1")
+	if !strings.Contains(out, "*"+brainLine+"*") {
+		t.Fatalf("brain record missing from debug capture (want italic system note):\n%s", out)
+	}
+	if strings.Contains(out, "**Billy:** "+brainLinePrefix) || strings.Contains(out, "**You:** "+brainLinePrefix) {
+		t.Fatalf("brain record attributed to a speaker in debug capture:\n%s", out)
+	}
+}
+
+// The clean :export emits only real conversation — [You]/[Billy] turns — so a
+// [Brain] routing record must not appear in it at all.
+func TestExportChatSkipsBrainLines(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BILLY_EXPORT_DIR", "") // force the default path
+	brainLine := brainRecordLine(&BrainReport{
+		Placement: "home", Provider: "ollama", ModelID: "qwen3.5:9b",
+		Reason: "routine turn; floor small",
+	})
+
+	path, err := exportChat([]string{"[You] hi", "[Billy] hello there", brainLine}, "sess-1")
+	if err != nil {
+		t.Fatalf("exportChat: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read export: %v", err)
+	}
+	out := string(data)
+	if strings.Contains(out, brainLinePrefix) || strings.Contains(out, "qwen3.5:9b") {
+		t.Fatalf("brain record leaked into the clean export:\n%s", out)
+	}
+	if !strings.Contains(out, "hello there") || !strings.Contains(out, "**You**") {
+		t.Fatalf("real conversation missing from export:\n%s", out)
+	}
+}

@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
 ## Current State
-ADR-0125 Phase 1 complete + P5 (Step 75) complete. TUI connects to billy-runtime, renders chat with Glamour Markdown, ctrl+s saves chat under ~/.billy/debug/.
+ADR-0125 Phase 1 complete + P5 (Step 75) complete. TUI connects to billy-runtime, renders chat with Glamour Markdown, ctrl+s saves chat under /tmp/billy/chat-log (override with BILLY_DEBUG_DIR).
 
 Operator sidebar redesigned (ADR-0125 Amendment 2026-06-20): five real-data sections — Connection+LLM, Runtime, Latency, Governance, Live Work Progress (I125) — each bound to a verified endpoint (`/runtime/status`, `/api/v1/llm/config`, `/reconciliation/recent`, `/api/v1/execution/jobs/active`) or a local measurement. Dead Observation/Memory stubs removed; prior placeholder sections that read nonexistent JSON keys are gone.
 
@@ -15,7 +15,7 @@ Git repository initialized for `bitscon/billy-tui`; initial scaffold commit reco
 - [Step 72] Visual identity — Lipgloss palette, Glamour Markdown, spinner, styled status bars
 - [Step 73] Live HTTP connection — POST /ask, session tracking, health check on startup
 - [Step 74] Sidebar live data — telemetry polling, governance border on tool.call.denied
-- [Step 75] Chat export — ctrl+s saves session under ~/.billy/debug/ (latest pointer + timestamped archive, override BILLY_DEBUG_DIR); :export writes under ~/.billy/exports/ (override BILLY_EXPORT_DIR); status bar confirms ✓
+- [Step 75] Chat export — ctrl+s saves session under /tmp/billy/chat-log (latest pointer + timestamped archive, override BILLY_DEBUG_DIR; moved off ~/.billy/debug/ so the agent account can read captures); :export writes under ~/.billy/exports/ (override BILLY_EXPORT_DIR); status bar confirms ✓
 - [Step 82] Repository initialized — local git history created; remote origin set to git@github.com:bitscon/billy-tui.git
 - [Streaming Parity Phase 3] Enter-key submit guard — blocks overlapping session submits while response is in progress
 - [Sidebar Redesign] Operator sidebar rebuilt against real endpoints (ADR-0125 Amendment 2026-06-20); replaces non-functional placeholder sections
