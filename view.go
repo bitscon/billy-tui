@@ -54,6 +54,7 @@ var helpContent = strings.TrimSpace(`
                 When routing is auto, the picker sets the pin
   :routing      Show/toggle auto-routing (interactive)
   :routing MODE Set routing to auto or pinned
+  :brains       Brain floors — view/set each role's minimum brain
   :help         Show this screen
 `)
 
@@ -161,7 +162,7 @@ func (m model) View() string {
 			": " + m.commandInput.View(),
 		)
 		hintRow = HintBarStyle.Width(m.width).Render(
-			"enter execute  esc cancel  :model  :routing  :clear  :export  :session new  :help",
+			"enter execute  esc cancel  :model  :routing  :brains  :clear  :export  :session new  :help",
 		)
 	} else {
 		focusIndicator := "─"
@@ -209,6 +210,63 @@ func (m model) View() string {
 		}
 		if end < len(m.modelOptions) {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↓ %d more", len(m.modelOptions)-end)) + "\n")
+		}
+		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			overlay,
+			lipgloss.WithWhitespaceBackground(lipgloss.AdaptiveColor{Dark: "#111111", Light: "#DDDDDD"}),
+		)
+	}
+
+	// ── brain-floor screen overlay (Modernization 5) ─────────────────────────
+	if m.floorMode {
+		var b strings.Builder
+		if m.floorTierPick && m.floors != nil && m.floorIdx < len(m.floorRoles) {
+			// Inner stage: pick the floor tier for the selected role, from the
+			// runtime's own ordered vocabulary — nothing hardcoded.
+			role := m.floorRoles[m.floorIdx]
+			current := m.floors.Roles[role]
+			b.WriteString(SectionHeaderStyle.Render("Floor for "+role) + "\n")
+			b.WriteString(DimStyle.Render("↑/↓ move · enter set · esc back") + "\n\n")
+			for i, tier := range m.floors.Tiers {
+				line := tier
+				if tier == current {
+					line += "  (current)"
+				}
+				if i == m.floorTierIdx {
+					b.WriteString(UserInputStyle.Render("▸ "+line) + "\n")
+				} else {
+					b.WriteString("  " + line + "\n")
+				}
+			}
+		} else {
+			b.WriteString(SectionHeaderStyle.Render("Brain floors — the minimum brain each role may use") + "\n")
+			b.WriteString(DimStyle.Render("↑/↓ move · enter change a floor · esc close") + "\n\n")
+			switch {
+			case m.floors == nil:
+				// loading, unavailable, or errored — the notice below says which
+			default:
+				for i, role := range m.floorRoles {
+					line := fmt.Sprintf("%-14s %s", truncate(role, 14), m.floors.Roles[role])
+					if i == m.floorIdx {
+						b.WriteString(UserInputStyle.Render("▸ "+line) + "\n")
+					} else {
+						b.WriteString("  " + line + "\n")
+					}
+				}
+				if len(m.floorRoles) > 0 && m.floors.DefaultFloor != "" {
+					b.WriteString(DimStyle.Render("any other role floors at "+m.floors.DefaultFloor) + "\n")
+				}
+			}
+		}
+		if m.floorNotice != "" {
+			style := DimStyle
+			if strings.HasPrefix(m.floorNotice, "⚠") {
+				style = SidebarWarnStyle
+			}
+			b.WriteString("\n" + style.Render(m.floorNotice) + "\n")
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
 		return lipgloss.Place(

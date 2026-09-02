@@ -258,3 +258,62 @@ func TestRoutingPickerOverlayRender(t *testing.T) {
 		}
 	}
 }
+
+// The floor screen lists every role with its floor plus the default-floor
+// footnote; on a runtime without the surface it renders the read-only notice
+// and no rows.
+func TestFloorOverlayTableAndDegrade(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	m.floorMode = true
+	m.floors = &BrainFloors{
+		Tiers:        []string{"small", "medium", "large"},
+		DefaultFloor: "small",
+		Roles:        map[string]string{"coder": "large", "sysadmin": "medium"},
+	}
+	m.floorRoles = []string{"coder", "sysadmin"}
+
+	out := m.View()
+	for _, want := range []string{"Brain floors", "coder", "large", "sysadmin", "medium", "any other role floors at small"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("floor overlay missing %q:\n%s", want, out)
+		}
+	}
+
+	m.floors = nil
+	m.floorRoles = nil
+	m.floorNotice = floorUnavailableNotice
+	out = m.View()
+	if !strings.Contains(out, "read-only") {
+		t.Fatalf("degraded overlay missing the read-only notice:\n%s", out)
+	}
+	if strings.Contains(out, "coder") {
+		t.Fatalf("degraded overlay must render no rows")
+	}
+}
+
+// The inner tier picker names the role, offers the runtime's vocabulary in
+// order, and marks the current floor.
+func TestFloorTierPickOverlayRender(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	m.floorMode = true
+	m.floorTierPick = true
+	m.floors = &BrainFloors{
+		Tiers:        []string{"small", "medium", "large"},
+		DefaultFloor: "small",
+		Roles:        map[string]string{"coder": "large"},
+	}
+	m.floorRoles = []string{"coder"}
+	m.floorIdx = 0
+	m.floorTierIdx = 2
+
+	out := m.View()
+	for _, want := range []string{"Floor for coder", "small", "medium", "large  (current)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("tier picker missing %q:\n%s", want, out)
+		}
+	}
+}

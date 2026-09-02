@@ -627,3 +627,167 @@ func TestRoutingSetMsgAdoptsReplyOrKeepsModeOnError(t *testing.T) {
 		t.Fatalf("status should report the failure: %q", nm2.saveStatus)
 	}
 }
+
+// ── brain-floor screen (Modernization 5) ─────────────────────────────────────
+
+// testFloors builds the contract v2 §10 fixture table.
+func testFloors() *BrainFloors {
+	return &BrainFloors{
+		Tiers:        []string{"small", "medium", "large"},
+		DefaultFloor: "small",
+		Roles:        map[string]string{"chat": "small", "coder": "large", "companion": "small", "sysadmin": "medium"},
+	}
+}
+
+// :brains opens the screen in a loading state and fires the fetch — nothing is
+// assumed about the runtime before the GET answers.
+func TestBrainsCommandOpensAndLoads(t *testing.T) {
+	m := initialModel(nil)
+	cmd := m.execCommand("brains")
+	if cmd == nil {
+		t.Fatalf(":brains should fire the table fetch")
+	}
+	if !m.floorMode || m.floors != nil {
+		t.Fatalf("screen should open with no table yet: floorMode=%v floors=%v", m.floorMode, m.floors)
+	}
+}
+
+// A loaded table renders rows in a stable sorted order (Go map iteration is
+// random); an unsupported runtime (404) degrades the screen to read-only —
+// no rows, an honest notice, and enter sends nothing.
+func TestFloorsLoadedSortsRowsAndUnsupportedIsReadOnly(t *testing.T) {
+	m := initialModel(nil)
+	m.floorMode = true
+	next, _ := m.Update(floorsLoadedMsg{floors: testFloors()})
+	nm := next.(model)
+	want := []string{"chat", "coder", "companion", "sysadmin"}
+	if len(nm.floorRoles) != len(want) {
+		t.Fatalf("rows = %v, want %v", nm.floorRoles, want)
+	}
+	for i := range want {
+		if nm.floorRoles[i] != want[i] {
+			t.Fatalf("rows = %v, want sorted %v", nm.floorRoles, want)
+		}
+	}
+
+	m2 := initialModel(nil)
+	m2.floorMode = true
+	next2, _ := m2.Update(floorsLoadedMsg{unsupported: true})
+	nm2 := next2.(model)
+	if nm2.floors != nil {
+		t.Fatalf("unsupported must leave no table")
+	}
+	if !strings.Contains(nm2.floorNotice, "read-only") {
+		t.Fatalf("notice should say read-only: %q", nm2.floorNotice)
+	}
+	next3, cmd := nm2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatalf("enter on an unavailable table must send nothing")
+	}
+	if !next3.(model).floorMode {
+		t.Fatalf("enter must not close the screen")
+	}
+}
+
+// Enter on a role opens the tier picker preselected on that role's current
+// floor, offering exactly the runtime's tier vocabulary.
+func TestFloorEnterOpensTierPickAtCurrentTier(t *testing.T) {
+	m := initialModel(nil)
+	m.floorMode = true
+	next, _ := m.Update(floorsLoadedMsg{floors: testFloors()})
+	nm := next.(model)
+	// select "sysadmin" (last row of the sorted order)
+	nm.floorIdx = len(nm.floorRoles) - 1
+	next2, cmd := nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm2 := next2.(model)
+	if cmd != nil {
+		t.Fatalf("opening the tier pick must not write anything")
+	}
+	if !nm2.floorTierPick {
+		t.Fatalf("tier picker should be open")
+	}
+	if nm2.floors.Tiers[nm2.floorTierIdx] != "medium" {
+		t.Fatalf("tier preselect = %q, want sysadmin's current floor medium", nm2.floors.Tiers[nm2.floorTierIdx])
+	}
+}
+
+// In the tier picker, enter on a DIFFERENT tier fires the one-role write; enter
+// on the current tier writes nothing; esc backs out to the table.
+func TestFloorTierPickWriteSkipAndCancel(t *testing.T) {
+	open := func() model {
+		m := initialModel(nil)
+		m.floorMode = true
+		next, _ := m.Update(floorsLoadedMsg{floors: testFloors()})
+		nm := next.(model)
+		nm.floorIdx = len(nm.floorRoles) - 1 // sysadmin (medium)
+		next2, _ := nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next2.(model)
+	}
+
+	nm := open()
+	next, _ := nm.Update(tea.KeyMsg{Type: tea.KeyDown}) // medium → large
+	next2, cmd := next.(model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("picking a different tier should fire the write")
+	}
+	if next2.(model).floorTierPick {
+		t.Fatalf("tier picker should close on enter")
+	}
+
+	nm2 := open()
+	_, cmd2 := nm2.Update(tea.KeyMsg{Type: tea.KeyEnter}) // enter on current (medium)
+	if cmd2 != nil {
+		t.Fatalf("picking the current tier must not write")
+	}
+
+	nm3 := open()
+	next3, _ := nm3.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	nm3b := next3.(model)
+	if nm3b.floorTierPick || !nm3b.floorMode {
+		t.Fatalf("esc should back out to the table, not close the screen")
+	}
+}
+
+// A successful write adopts the runtime's post-write table — the screen shows
+// what actually took effect, selection kept on the changed role — and says so.
+// A failed write keeps the table and reports the failure.
+func TestFloorSetMsgAdoptsPostWriteTableOrReportsFailure(t *testing.T) {
+	m := initialModel(nil)
+	m.floorMode = true
+	next, _ := m.Update(floorsLoadedMsg{floors: testFloors()})
+	nm := next.(model)
+
+	updated := testFloors()
+	updated.Roles["sysadmin"] = "large"
+	next2, _ := nm.Update(floorSetMsg{role: "sysadmin", tier: "large", floors: updated})
+	nm2 := next2.(model)
+	if nm2.floors.Roles["sysadmin"] != "large" {
+		t.Fatalf("post-write table not adopted: %v", nm2.floors.Roles)
+	}
+	if nm2.floorRoles[nm2.floorIdx] != "sysadmin" {
+		t.Fatalf("selection should stay on the changed role, got %q", nm2.floorRoles[nm2.floorIdx])
+	}
+	if !strings.Contains(nm2.floorNotice, "✓ sysadmin floor → large") {
+		t.Fatalf("notice = %q, want the took-effect confirmation", nm2.floorNotice)
+	}
+
+	next3, _ := nm2.Update(floorSetMsg{role: "coder", tier: "small", err: errors.New("400")})
+	nm3 := next3.(model)
+	if nm3.floors.Roles["coder"] != "large" {
+		t.Fatalf("a failed write must not touch the table: %v", nm3.floors.Roles)
+	}
+	if !strings.Contains(nm3.floorNotice, "⚠ change failed") {
+		t.Fatalf("notice = %q, want the failure report", nm3.floorNotice)
+	}
+}
+
+// esc from the role table closes the whole screen.
+func TestFloorScreenEscCloses(t *testing.T) {
+	m := initialModel(nil)
+	m.floorMode = true
+	next, _ := m.Update(floorsLoadedMsg{floors: testFloors()})
+	next2, _ := next.(model).Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if next2.(model).floorMode {
+		t.Fatalf("esc should close the floor screen")
+	}
+}

@@ -68,6 +68,17 @@ type model struct {
 	routingPickerMode bool
 	routingPickerIdx  int
 
+	// brain-floor screen (':brains' command, Modernization 5). floors stays nil
+	// while loading and on a runtime without the surface — the screen is then
+	// read-only and never writes (contract v2 §8 gate).
+	floorMode     bool
+	floors        *BrainFloors
+	floorRoles    []string // stable sorted row order for floors.Roles
+	floorIdx      int      // selected role row
+	floorTierPick bool     // inner tier picker open for the selected role
+	floorTierIdx  int
+	floorNotice   string // in-overlay status: loading / unavailable / error / took-effect
+
 	// spinner / response state
 	spinner      spinner.Model
 	thinking     bool
@@ -177,6 +188,24 @@ type modelSetMsg struct {
 	provider string
 	model    string
 	err      error
+}
+
+// floorsLoadedMsg is the result of fetching the brain-floor table.
+// unsupported marks a legacy runtime (404): the screen degrades read-only.
+type floorsLoadedMsg struct {
+	floors      *BrainFloors
+	unsupported bool
+	err         error
+}
+
+// floorSetMsg is the result of setting one role's floor. On success floors is
+// the runtime's post-write table (contract v2 §10) — the took-effect proof.
+type floorSetMsg struct {
+	role        string
+	tier        string
+	floors      *BrainFloors
+	unsupported bool
+	err         error
 }
 
 // routingSetMsg is the result of a mode-only config POST (contract v2 §9). On

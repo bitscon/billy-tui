@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -313,6 +314,65 @@ func loadModels(c *billyClient) tea.Cmd {
 	}
 }
 
+// floorRoleRows derives the floor screen's stable row order from the roles map
+// (Go map iteration is random; the operator's table must not shuffle per render).
+func floorRoleRows(f *BrainFloors) []string {
+	if f == nil {
+		return nil
+	}
+	rows := make([]string, 0, len(f.Roles))
+	for role := range f.Roles {
+		rows = append(rows, role)
+	}
+	sort.Strings(rows)
+	return rows
+}
+
+// loadFloors fetches the brain-floor table for the ':brains' screen.
+func loadFloors(c *billyClient) tea.Cmd {
+	return func() tea.Msg {
+		f, err := c.BrainFloors()
+		if err != nil {
+			if errors.Is(err, errFloorSurfaceAbsent) {
+				return floorsLoadedMsg{unsupported: true}
+			}
+			return floorsLoadedMsg{err: err}
+		}
+		return floorsLoadedMsg{floors: f}
+	}
+}
+
+// setFloor fires the one-role floor write (contract v2 §10).
+func setFloor(c *billyClient, role, tier string) tea.Cmd {
+	return func() tea.Msg {
+		f, err := c.SetBrainFloor(role, tier)
+		if err != nil {
+			if errors.Is(err, errFloorSurfaceAbsent) {
+				return floorSetMsg{role: role, tier: tier, unsupported: true}
+			}
+			return floorSetMsg{role: role, tier: tier, err: err}
+		}
+		return floorSetMsg{role: role, tier: tier, floors: f}
+	}
+}
+
+// adoptFloors installs a fresh floor table in the screen state, re-deriving the
+// row order and keeping the selection on the same role where possible.
+func (m *model) adoptFloors(f *BrainFloors, keepRole string) {
+	m.floors = f
+	m.floorRoles = floorRoleRows(f)
+	m.floorIdx = 0
+	for i, role := range m.floorRoles {
+		if role == keepRole {
+			m.floorIdx = i
+		}
+	}
+}
+
+// floorUnavailableNotice is the read-only degrade line for a runtime without
+// the floor surface (contract v2 §10 / degradation matrix).
+const floorUnavailableNotice = "This runtime does not offer the brain-floor table — read-only, nothing sent"
+
 // routingModes are the two conductor modes, in ':routing' picker order.
 var routingModes = []string{"auto", "pinned"}
 
@@ -375,6 +435,16 @@ func (m *model) execCommand(raw string) tea.Cmd {
 		m.saveStatus = "Switching…"
 		m.saveStatusTicks = 4
 		return setModel(m.client, provider, model)
+	case "brains", "floors":
+		// Open the floor screen and fetch fresh — no capability pre-gate needed:
+		// the GET itself answers (data, or 404 → read-only degrade, §8/§10).
+		m.floorMode = true
+		m.floorTierPick = false
+		m.floors = nil
+		m.floorRoles = nil
+		m.floorIdx = 0
+		m.floorNotice = "loading…"
+		return loadFloors(m.client)
 	case "routing":
 		// Capability gate (contract v2 §8): a runtime that never reported a
 		// routing mode has no mode-set surface — degrade read-only and send
@@ -571,6 +641,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sidebar.provider = msg.provider
 		}
 		m.saveStatusTicks = 4
+		return m, nil
+
+	// ── brain-floor screen data (Modernization 5) ────────────────────────────
+	case floorsLoadedMsg:
+		if !m.floorMode {
+			return m, nil // screen was closed before the fetch landed
+		}
+		switch {
+		case msg.unsupported:
+			m.floors = nil
+			m.floorRoles = nil
+			m.floorNotice = floorUnavailableNotice
+		case msg.err != nil:
+			m.floors = nil
+			m.floorRoles = nil
+			m.floorNotice = "⚠ could not read the floor table: " + msg.err.Error()
+		default:
+			m.adoptFloors(msg.floors, "")
+			m.floorNotice = ""
+			if len(m.floorRoles) == 0 {
+				m.floorNotice = "no roles listed — every role floors at " + msg.floors.DefaultFloor
+			}
+		}
+		return m, nil
+
+	case floorSetMsg:
+		if !m.floorMode {
+			return m, nil
+		}
+		switch {
+		case msg.unsupported:
+			m.floorNotice = floorUnavailableNotice
+		case msg.err != nil:
+			m.floorNotice = "⚠ change failed: " + msg.err.Error()
+		default:
+			// The response is the runtime's post-write table (contract v2 §10) —
+			// re-render from it; what the screen now shows IS what took effect.
+			m.adoptFloors(msg.floors, msg.role)
+			m.floorNotice = "✓ " + msg.role + " floor → " + msg.tier + " — live from the next turn"
+		}
 		return m, nil
 
 	// ── routing mode switch result (Modernization 6) ─────────────────────────
@@ -842,6 +952,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, setModel(m.client, opt.provider, opt.model)
 			case "esc", "ctrl+c":
 				m.modelPickerMode = false
+			}
+			return m, nil
+		}
+
+		// ── brain-floor screen: navigate roles, pick a tier (Modernization 5) ──
+		if m.floorMode {
+			// Inner tier picker for the selected role.
+			if m.floorTierPick {
+				switch msg.String() {
+				case "up", "k":
+					if m.floorTierIdx > 0 {
+						m.floorTierIdx--
+					}
+				case "down", "j":
+					if m.floors != nil && m.floorTierIdx < len(m.floors.Tiers)-1 {
+						m.floorTierIdx++
+					}
+				case "enter":
+					if m.floors == nil || m.floorIdx >= len(m.floorRoles) || m.floorTierIdx >= len(m.floors.Tiers) {
+						m.floorTierPick = false
+						return m, nil
+					}
+					role := m.floorRoles[m.floorIdx]
+					tier := m.floors.Tiers[m.floorTierIdx]
+					m.floorTierPick = false
+					if m.floors.Roles[role] == tier {
+						m.floorNotice = role + " already floors at " + tier
+						return m, nil
+					}
+					m.floorNotice = "setting " + role + " → " + tier + "…"
+					return m, setFloor(m.client, role, tier)
+				case "esc", "ctrl+c":
+					m.floorTierPick = false
+				}
+				return m, nil
+			}
+			switch msg.String() {
+			case "up", "k":
+				if m.floorIdx > 0 {
+					m.floorIdx--
+				}
+			case "down", "j":
+				if m.floorIdx < len(m.floorRoles)-1 {
+					m.floorIdx++
+				}
+			case "enter":
+				// Read-only unless the surface delivered data (contract v2 §8):
+				// with no table there is nothing to change and nothing is sent.
+				if m.floors == nil || len(m.floorRoles) == 0 || len(m.floors.Tiers) == 0 {
+					return m, nil
+				}
+				current := m.floors.Roles[m.floorRoles[m.floorIdx]]
+				m.floorTierIdx = 0
+				for i, tier := range m.floors.Tiers {
+					if tier == current {
+						m.floorTierIdx = i
+					}
+				}
+				m.floorTierPick = true
+			case "esc", "q", "ctrl+c":
+				m.floorMode = false
+				m.floorTierPick = false
 			}
 			return m, nil
 		}

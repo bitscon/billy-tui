@@ -613,3 +613,96 @@ func TestSetRoutingModeErrorSurfaces(t *testing.T) {
 		t.Fatalf("expected an error from a 400, got nil")
 	}
 }
+
+// floorFixture is the contract v2 §10 GET shape used across the floor tests.
+const floorFixture = `{"tiers":["small","medium","large"],"default_floor":"small",` +
+	`"roles":{"chat":"small","coder":"large","companion":"small","sysadmin":"medium"}}`
+
+// TestBrainFloorsDecodeAndAbsent verifies the GET decodes the ordered tier
+// vocabulary, the effective table, and the default floor — and that a 404 maps
+// to the errFloorSurfaceAbsent sentinel (legacy runtime), never a plain error.
+func TestBrainFloorsDecodeAndAbsent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/llm/brain-floors" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, floorFixture)
+	}))
+	defer srv.Close()
+
+	f, err := newBillyClient(srv.URL).BrainFloors()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(f.Tiers) != 3 || f.Tiers[0] != "small" || f.Tiers[2] != "large" {
+		t.Fatalf("tiers decoded wrong (order matters): %v", f.Tiers)
+	}
+	if f.DefaultFloor != "small" {
+		t.Fatalf("default_floor = %q, want small", f.DefaultFloor)
+	}
+	if f.Roles["coder"] != "large" || f.Roles["sysadmin"] != "medium" || len(f.Roles) != 4 {
+		t.Fatalf("roles decoded wrong: %v", f.Roles)
+	}
+
+	srv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv404.Close()
+	if _, err := newBillyClient(srv404.URL).BrainFloors(); !errors.Is(err, errFloorSurfaceAbsent) {
+		t.Fatalf("404 must map to errFloorSurfaceAbsent, got %v", err)
+	}
+}
+
+// TestSetBrainFloorPostsOneRole verifies the write is a one-role POST
+// (contract v2 §10): the role rides the path, the body is exactly {"tier": …},
+// and the runtime's post-write table decodes back as the took-effect proof.
+func TestSetBrainFloorPostsOneRole(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("body decode: %v", err)
+		}
+		_, _ = io.WriteString(w, `{"tiers":["small","medium","large"],"default_floor":"small",`+
+			`"roles":{"chat":"small","coder":"large","companion":"small","sysadmin":"large"}}`)
+	}))
+	defer srv.Close()
+
+	f, err := newBillyClient(srv.URL).SetBrainFloor("sysadmin", "large")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v1/llm/brain-floors/sysadmin" {
+		t.Fatalf("path = %q, want the role in the path", gotPath)
+	}
+	if len(gotBody) != 1 || gotBody["tier"] != "large" {
+		t.Fatalf("body = %v, want exactly {tier: large}", gotBody)
+	}
+	if f.Roles["sysadmin"] != "large" {
+		t.Fatalf("post-write table not adopted: %v", f.Roles)
+	}
+}
+
+// TestSetBrainFloorErrors verifies a 400 (e.g. unknown_tier) surfaces as an
+// error and a 404 maps to the absent-surface sentinel.
+func TestSetBrainFloorErrors(t *testing.T) {
+	srv400 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv400.Close()
+	if _, err := newBillyClient(srv400.URL).SetBrainFloor("coder", "sideways"); err == nil {
+		t.Fatalf("expected an error from a 400, got nil")
+	}
+
+	srv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv404.Close()
+	if _, err := newBillyClient(srv404.URL).SetBrainFloor("coder", "large"); !errors.Is(err, errFloorSurfaceAbsent) {
+		t.Fatalf("404 must map to errFloorSurfaceAbsent, got %v", err)
+	}
+}

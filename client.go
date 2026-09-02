@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -455,6 +456,67 @@ func (c *billyClient) SetLLMConfig(provider, model, baseURL string) (*LLMConfig,
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// errFloorSurfaceAbsent marks a 404 from the brain-floors surface: a legacy
+// runtime that does not offer the floor table (contract v2 §10). The floor
+// screen then degrades read-only and the client never POSTs (§8 gate).
+var errFloorSurfaceAbsent = errors.New("brain-floor surface not offered by this runtime")
+
+// BrainFloors mirrors GET /api/v1/llm/brain-floors and the POST response
+// (contract v2 §10/§11). Tiers is the runtime's ordered vocabulary (smallest →
+// largest) — the client offers exactly these and hardcodes no tier names.
+// Roles is the effective role→floor table; a role absent from it floors at
+// DefaultFloor.
+type BrainFloors struct {
+	Tiers        []string          `json:"tiers"`
+	DefaultFloor string            `json:"default_floor"`
+	Roles        map[string]string `json:"roles"`
+}
+
+// BrainFloors reads the effective role→floor table. A 404 comes back as
+// errFloorSurfaceAbsent so callers can tell "legacy runtime" from a real error.
+func (c *billyClient) BrainFloors() (*BrainFloors, error) {
+	resp, err := c.http.Get(c.baseURL + "/api/v1/llm/brain-floors")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errFloorSurfaceAbsent
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GET /api/v1/llm/brain-floors: %d", resp.StatusCode)
+	}
+	var f BrainFloors
+	if err := json.NewDecoder(resp.Body).Decode(&f); err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// SetBrainFloor sets ONE role's floor tier (contract v2 §10) and returns the
+// runtime's post-write table — the took-effect proof the screen re-renders from.
+func (c *billyClient) SetBrainFloor(role, tier string) (*BrainFloors, error) {
+	body, _ := json.Marshal(map[string]string{"tier": tier})
+	resp, err := c.http.Post(
+		c.baseURL+"/api/v1/llm/brain-floors/"+url.PathEscape(role),
+		"application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errFloorSurfaceAbsent
+	}
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("set brain floor: %d", resp.StatusCode)
+	}
+	var f BrainFloors
+	if err := json.NewDecoder(resp.Body).Decode(&f); err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
 // SetRoutingMode flips the conductor routing mode ("auto" | "pinned") with a
