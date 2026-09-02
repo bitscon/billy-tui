@@ -508,3 +508,122 @@ func TestModelSetMsgAutoRoutingCaution(t *testing.T) {
 		t.Fatalf("modelSetMsg must not invent a routing mode: %q", nm2.routingMode)
 	}
 }
+
+// ── mode toggle (Modernization 6) ────────────────────────────────────────────
+
+// Against a runtime that never reported a routing mode there is no mode-set
+// surface: :routing — bare or with an argument — must degrade read-only,
+// opening nothing and sending nothing (contract v2 §8 capability gate).
+func TestRoutingCommandDegradesOnLegacyRuntime(t *testing.T) {
+	m := initialModel(nil) // routingMode "" = legacy
+	if cmd := m.execCommand("routing"); cmd != nil {
+		t.Fatalf("bare :routing must send nothing on a legacy runtime")
+	}
+	if m.routingPickerMode {
+		t.Fatalf("picker must not open on a legacy runtime")
+	}
+	if !strings.Contains(m.saveStatus, "unavailable") {
+		t.Fatalf("status should say the toggle is unavailable: %q", m.saveStatus)
+	}
+	if cmd := m.execCommand("routing pinned"); cmd != nil {
+		t.Fatalf(":routing pinned must send nothing on a legacy runtime")
+	}
+}
+
+// Bare :routing on a conductor-aware runtime opens the picker preselected on
+// the current mode, without POSTing anything yet.
+func TestRoutingCommandOpensPickerAtCurrentMode(t *testing.T) {
+	m := initialModel(nil)
+	m.routingMode = "pinned"
+	if cmd := m.execCommand("routing"); cmd != nil {
+		t.Fatalf("opening the picker must not send anything")
+	}
+	if !m.routingPickerMode {
+		t.Fatalf("picker should be open")
+	}
+	if routingModes[m.routingPickerIdx] != "pinned" {
+		t.Fatalf("picker preselect = %q, want the current mode", routingModes[m.routingPickerIdx])
+	}
+}
+
+// :routing with a valid mode argument fires the switch; an invalid argument is
+// refused with a usage hint and nothing sent.
+func TestRoutingCommandArgSwitchesOrRefuses(t *testing.T) {
+	m := initialModel(nil)
+	m.routingMode = "auto"
+	if cmd := m.execCommand("routing pinned"); cmd == nil {
+		t.Fatalf(":routing pinned should fire the switch command")
+	}
+
+	m2 := initialModel(nil)
+	m2.routingMode = "auto"
+	if cmd := m2.execCommand("routing sideways"); cmd != nil {
+		t.Fatalf("an invalid mode must send nothing")
+	}
+	if !strings.Contains(m2.saveStatus, "auto|pinned") {
+		t.Fatalf("status should show usage: %q", m2.saveStatus)
+	}
+}
+
+// In the picker, enter on a DIFFERENT mode fires the switch and closes; enter
+// on the current mode closes without a pointless POST; esc cancels.
+func TestRoutingPickerEnterAndCancel(t *testing.T) {
+	m := initialModel(nil)
+	m.routingMode = "auto"
+	m.execCommand("routing") // opens preselected on auto (idx 0)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, cmd := next.(model).Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd == nil {
+		t.Fatalf("selecting the other mode should fire the switch")
+	}
+	if nm.routingPickerMode {
+		t.Fatalf("picker should close on enter")
+	}
+
+	m2 := initialModel(nil)
+	m2.routingMode = "auto"
+	m2.execCommand("routing")
+	next2, cmd2 := m2.Update(tea.KeyMsg{Type: tea.KeyEnter}) // enter on the current mode
+	if cmd2 != nil {
+		t.Fatalf("selecting the current mode must not POST")
+	}
+	if !strings.Contains(next2.(model).saveStatus, "already") {
+		t.Fatalf("status should say already in that mode: %q", next2.(model).saveStatus)
+	}
+
+	m3 := initialModel(nil)
+	m3.routingMode = "auto"
+	m3.execCommand("routing")
+	next3, _ := m3.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if next3.(model).routingPickerMode {
+		t.Fatalf("esc should close the picker")
+	}
+}
+
+// A successful mode set adopts the runtime's authoritative reply — the mode
+// flips immediately, not on the next poll — and the status confirms it in
+// operator words. A failed set keeps the current mode and says so.
+func TestRoutingSetMsgAdoptsReplyOrKeepsModeOnError(t *testing.T) {
+	m := initialModel(nil)
+	m.routingMode = "auto"
+	next, _ := m.Update(routingSetMsg{cfg: &LLMConfig{Provider: "ollama", Model: "qwen3.5:9b", RoutingMode: "pinned"}})
+	nm := next.(model)
+	if nm.routingMode != "pinned" {
+		t.Fatalf("routingMode = %q, want pinned (adopted from the reply)", nm.routingMode)
+	}
+	if !strings.Contains(nm.saveStatus, "routing pinned") {
+		t.Fatalf("status = %q, want the pinned confirmation", nm.saveStatus)
+	}
+
+	m2 := initialModel(nil)
+	m2.routingMode = "auto"
+	next2, _ := m2.Update(routingSetMsg{err: errors.New("boom")})
+	nm2 := next2.(model)
+	if nm2.routingMode != "auto" {
+		t.Fatalf("a failed switch must keep the current mode, got %q", nm2.routingMode)
+	}
+	if !strings.Contains(nm2.saveStatus, "failed") {
+		t.Fatalf("status should report the failure: %q", nm2.saveStatus)
+	}
+}

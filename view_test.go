@@ -220,3 +220,41 @@ func TestHelpContentConductorLines(t *testing.T) {
 		}
 	}
 }
+
+// Under auto routing the model picker warns BEFORE the choice that a pick only
+// sets the pin; under pinned/legacy the picker stays exactly as today.
+func TestModelPickerAutoPinWarningLine(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	m.modelPickerMode = true
+	m.modelOptions = []modelOption{{provider: "ollama", model: "qwen3.5:9b", label: "ollama · qwen3.5:9b"}}
+
+	m.routingMode = "auto"
+	if out := m.View(); !strings.Contains(out, "your pick sets the pin") {
+		t.Fatalf("auto model picker missing the pin warning:\n%s", out)
+	}
+
+	m.routingMode = ""
+	if out := m.View(); strings.Contains(out, "sets the pin") {
+		t.Fatalf("legacy model picker must not carry the pin warning")
+	}
+}
+
+// The routing picker overlay lists both modes in operator words, marks the
+// current one, and highlights the selection.
+func TestRoutingPickerOverlayRender(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	m.routingMode = "auto"
+	m.routingPickerMode = true
+	m.routingPickerIdx = 1
+
+	out := m.View()
+	for _, want := range []string{"Routing mode", "auto — Billy picks a brain per turn", "pinned — every turn uses the pinned model", "(current)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("routing picker missing %q:\n%s", want, out)
+		}
+	}
+}

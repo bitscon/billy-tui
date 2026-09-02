@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -568,5 +569,47 @@ func TestGetJSONNon200(t *testing.T) {
 	err := newBillyClient(srv.URL).getJSON("/runtime/status", &dest)
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Fatalf("expected a 500 error, got %v", err)
+	}
+}
+
+// TestSetRoutingModePostsModeOnly verifies the toggle is a mode-only POST
+// (contract v2 §9): the body carries routing_mode and NOTHING else — no
+// provider, no model — so the pin cannot be disturbed; and the runtime's
+// authoritative config reply decodes back, routing_mode included.
+func TestSetRoutingModePostsModeOnly(t *testing.T) {
+	var gotBody map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/llm/config" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("body decode: %v", err)
+		}
+		_, _ = io.WriteString(w, `{"provider":"ollama","model":"qwen3.5:9b","configured":true,"routing_mode":"pinned"}`)
+	}))
+	defer srv.Close()
+
+	cfg, err := newBillyClient(srv.URL).SetRoutingMode("pinned")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(gotBody) != 1 || gotBody["routing_mode"] != "pinned" {
+		t.Fatalf("body = %v, want exactly {routing_mode: pinned}", gotBody)
+	}
+	if cfg.RoutingMode != "pinned" || cfg.Provider != "ollama" || cfg.Model != "qwen3.5:9b" {
+		t.Fatalf("reply decoded wrong: %+v", cfg)
+	}
+}
+
+// TestSetRoutingModeErrorSurfaces verifies a rejected mode set (e.g. a 400
+// invalid_routing_mode) comes back as an error, never a silent success.
+func TestSetRoutingModeErrorSurfaces(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	if _, err := newBillyClient(srv.URL).SetRoutingMode("sideways"); err == nil {
+		t.Fatalf("expected an error from a 400, got nil")
 	}
 }

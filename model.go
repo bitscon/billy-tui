@@ -64,6 +64,10 @@ type model struct {
 	modelOptions    []modelOption
 	modelPickerIdx  int
 
+	// routing-mode picker (':routing' command, Modernization 6)
+	routingPickerMode bool
+	routingPickerIdx  int
+
 	// spinner / response state
 	spinner      spinner.Model
 	thinking     bool
@@ -173,6 +177,15 @@ type modelSetMsg struct {
 	provider string
 	model    string
 	err      error
+}
+
+// routingSetMsg is the result of a mode-only config POST (contract v2 §9). On
+// success cfg carries the runtime's authoritative config reply — including the
+// now-effective routing_mode — which the handler adopts; the 5s poll remains
+// the standing authority afterwards.
+type routingSetMsg struct {
+	cfg *LLMConfig
+	err error
 }
 
 type StreamChunkMsg struct {

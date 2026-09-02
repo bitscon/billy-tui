@@ -313,6 +313,30 @@ func loadModels(c *billyClient) tea.Cmd {
 	}
 }
 
+// routingModes are the two conductor modes, in ':routing' picker order.
+var routingModes = []string{"auto", "pinned"}
+
+// routingModeBlurb is the operator-facing meaning of each mode, shared by the
+// picker rows and the switch confirmation so both always tell the same story.
+func routingModeBlurb(mode string) string {
+	if mode == "auto" {
+		return "Billy picks a brain per turn"
+	}
+	return "every turn uses the pinned model"
+}
+
+// setRoutingMode fires the mode-only POST (contract v2 §9). The provider/model
+// pin is untouched by design — only the mode changes hands.
+func setRoutingMode(c *billyClient, mode string) tea.Cmd {
+	return func() tea.Msg {
+		cfg, err := c.SetRoutingMode(mode)
+		if err != nil {
+			return routingSetMsg{err: err}
+		}
+		return routingSetMsg{cfg: cfg}
+	}
+}
+
 // setModel switches the active model via the sanctioned operator API. When
 // switching within the same provider it preserves the operator's current
 // base_url, so a custom host (e.g. a remote ollama) is not reset to the
@@ -351,6 +375,35 @@ func (m *model) execCommand(raw string) tea.Cmd {
 		m.saveStatus = "Switching…"
 		m.saveStatusTicks = 4
 		return setModel(m.client, provider, model)
+	case "routing":
+		// Capability gate (contract v2 §8): a runtime that never reported a
+		// routing mode has no mode-set surface — degrade read-only and send
+		// nothing, neither the picker nor a POST.
+		if m.routingMode == "" {
+			m.saveStatus = "This runtime does not report routing — toggle unavailable"
+			m.saveStatusTicks = 4
+			return nil
+		}
+		if len(parts) == 1 {
+			// no arg → open the two-row picker preselected on the current mode
+			m.routingPickerIdx = 0
+			for i, mode := range routingModes {
+				if mode == m.routingMode {
+					m.routingPickerIdx = i
+				}
+			}
+			m.routingPickerMode = true
+			return nil
+		}
+		mode := strings.ToLower(parts[1])
+		if mode != "auto" && mode != "pinned" {
+			m.saveStatus = "Usage: :routing [auto|pinned]"
+			m.saveStatusTicks = 4
+			return nil
+		}
+		m.saveStatus = "Switching routing…"
+		m.saveStatusTicks = 4
+		return setRoutingMode(m.client, mode)
 	case "clear", "c":
 		m.clearChat()
 	case "export", "e":
@@ -516,6 +569,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.sidebar.model = msg.model
 			m.sidebar.provider = msg.provider
+		}
+		m.saveStatusTicks = 4
+		return m, nil
+
+	// ── routing mode switch result (Modernization 6) ─────────────────────────
+	case routingSetMsg:
+		if msg.err != nil {
+			m.saveStatus = "⚠️  routing switch failed: " + msg.err.Error()
+			m.saveStatusTicks = 4
+			return m, nil
+		}
+		// The response IS the runtime's authoritative config reply (contract v2
+		// §9) — adopt its mode now; the 5s poll stays the standing authority
+		// afterwards, so a runtime downgrade can never leave a stale mode.
+		m.routingMode = msg.cfg.RoutingMode
+		m.sidebar.provider = msg.cfg.Provider
+		m.sidebar.model = msg.cfg.Model
+		if msg.cfg.RoutingMode == "" {
+			// A runtime that accepted the POST but reports no mode is legacy as
+			// far as display goes (contract §2) — say so rather than inventing.
+			m.saveStatus = "Runtime reported no routing mode — showing legacy display"
+		} else {
+			m.saveStatus = "✓ routing " + msg.cfg.RoutingMode + " — " + routingModeBlurb(msg.cfg.RoutingMode)
 		}
 		m.saveStatusTicks = 4
 		return m, nil
@@ -766,6 +842,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, setModel(m.client, opt.provider, opt.model)
 			case "esc", "ctrl+c":
 				m.modelPickerMode = false
+			}
+			return m, nil
+		}
+
+		// ── routing picker: navigate / select / cancel (Modernization 6) ──
+		if m.routingPickerMode {
+			switch msg.String() {
+			case "up", "k":
+				if m.routingPickerIdx > 0 {
+					m.routingPickerIdx--
+				}
+			case "down", "j":
+				if m.routingPickerIdx < len(routingModes)-1 {
+					m.routingPickerIdx++
+				}
+			case "enter":
+				mode := routingModes[m.routingPickerIdx]
+				m.routingPickerMode = false
+				if mode == m.routingMode {
+					m.saveStatus = "Routing already " + mode
+					m.saveStatusTicks = 4
+					return m, nil
+				}
+				m.saveStatus = "Switching routing…"
+				m.saveStatusTicks = 4
+				return m, setRoutingMode(m.client, mode)
+			case "esc", "ctrl+c":
+				m.routingPickerMode = false
 			}
 			return m, nil
 		}

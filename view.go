@@ -52,6 +52,8 @@ var helpContent = strings.TrimSpace(`
   :model        Pick a model (interactive)
   :model P [M]  Switch to provider P (optional model M)
                 When routing is auto, the picker sets the pin
+  :routing      Show/toggle auto-routing (interactive)
+  :routing MODE Set routing to auto or pinned
   :help         Show this screen
 `)
 
@@ -159,7 +161,7 @@ func (m model) View() string {
 			": " + m.commandInput.View(),
 		)
 		hintRow = HintBarStyle.Width(m.width).Render(
-			"enter execute  esc cancel  :model  :clear  :export  :session new  :help",
+			"enter execute  esc cancel  :model  :routing  :clear  :export  :session new  :help",
 		)
 	} else {
 		focusIndicator := "─"
@@ -187,7 +189,13 @@ func (m model) View() string {
 
 		var b strings.Builder
 		b.WriteString(SectionHeaderStyle.Render("Select a model") + "\n")
-		b.WriteString(DimStyle.Render("↑/↓ move · enter switch · esc cancel") + "\n\n")
+		b.WriteString(DimStyle.Render("↑/↓ move · enter switch · esc cancel") + "\n")
+		// Under auto routing a pick only sets the pin/home config (contract §7) —
+		// say so BEFORE the choice, not just in the after-the-fact status line.
+		if m.routingMode == "auto" {
+			b.WriteString(SidebarWarnStyle.Render("routing is auto — your pick sets the pin; the conductor may choose another brain per turn") + "\n")
+		}
+		b.WriteString("\n")
 		if start > 0 {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
 		}
@@ -201,6 +209,31 @@ func (m model) View() string {
 		}
 		if end < len(m.modelOptions) {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↓ %d more", len(m.modelOptions)-end)) + "\n")
+		}
+		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			overlay,
+			lipgloss.WithWhitespaceBackground(lipgloss.AdaptiveColor{Dark: "#111111", Light: "#DDDDDD"}),
+		)
+	}
+
+	// ── routing-mode picker overlay (Modernization 6) ────────────────────────
+	if m.routingPickerMode {
+		var b strings.Builder
+		b.WriteString(SectionHeaderStyle.Render("Routing mode") + "\n")
+		b.WriteString(DimStyle.Render("↑/↓ move · enter switch · esc cancel") + "\n\n")
+		for i, mode := range routingModes {
+			line := mode + " — " + routingModeBlurb(mode)
+			if mode == m.routingMode {
+				line += "  (current)"
+			}
+			if i == m.routingPickerIdx {
+				b.WriteString(UserInputStyle.Render("▸ "+line) + "\n")
+			} else {
+				b.WriteString("  " + line + "\n")
+			}
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
 		return lipgloss.Place(

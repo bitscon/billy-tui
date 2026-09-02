@@ -456,3 +456,25 @@ func (c *billyClient) SetLLMConfig(provider, model, baseURL string) (*LLMConfig,
 	}
 	return &cfg, nil
 }
+
+// SetRoutingMode flips the conductor routing mode ("auto" | "pinned") with a
+// mode-only POST to the existing config surface (contract v2 §9): only
+// routing_mode rides the body, so the provider/model pin is untouched. Callers
+// hold the capability gate (contract v2 §8) — never call this against a runtime
+// whose config GET did not carry routing_mode.
+func (c *billyClient) SetRoutingMode(mode string) (*LLMConfig, error) {
+	body, _ := json.Marshal(map[string]string{"routing_mode": mode})
+	resp, err := c.http.Post(c.baseURL+"/api/v1/llm/config", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("set routing mode: %d", resp.StatusCode)
+	}
+	var cfg LLMConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
