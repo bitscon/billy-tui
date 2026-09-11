@@ -86,18 +86,20 @@ func TestExportChatHonorsEnvOverride(t *testing.T) {
 	}
 }
 
-// ctrl+s save must put both the "latest" pointer and the timestamped archive in
-// the debug dir (BILLY_DEBUG_DIR override), and never in the $HOME root.
-func TestSaveChatWritesToDebugDir(t *testing.T) {
+// ctrl+s save must default to ~/.billy/debug — the durable location the
+// architect role contract opens for a "debug billy" investigation — with the
+// "latest" pointer and the timestamped archive together and the $HOME root
+// clean.
+func TestSaveChatWritesUnderBillyDebug(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	debugDir := t.TempDir()
-	t.Setenv("BILLY_DEBUG_DIR", debugDir)
+	t.Setenv("BILLY_DEBUG_DIR", "") // force the default path
 
 	latest, err := saveChat([]string{"[You] hi", "[Billy] hey"}, "sess-1")
 	if err != nil {
 		t.Fatalf("saveChat: %v", err)
 	}
+	debugDir := filepath.Join(home, ".billy", "debug")
 	if filepath.Dir(latest) != debugDir {
 		t.Fatalf("latest dir = %s, want %s", filepath.Dir(latest), debugDir)
 	}
@@ -117,15 +119,94 @@ func TestSaveChatWritesToDebugDir(t *testing.T) {
 	}
 }
 
-// The default debug dir sits outside any user's $HOME so the agent account that
-// runs "debug billy" can read captures the operator saves — the reachability the
-// move to a shared path exists to guarantee.
-func TestDefaultDebugDirIsOutsideHome(t *testing.T) {
-	if defaultDebugDir != "/tmp/billy/chat-log" {
-		t.Fatalf("defaultDebugDir = %q, want /tmp/billy/chat-log", defaultDebugDir)
+// A BILLY_DEBUG_DIR override is honored verbatim, so the capture directory can
+// be pointed at a shared durable path without a rebuild.
+func TestSaveChatHonorsDebugDirOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	override := t.TempDir()
+	t.Setenv("BILLY_DEBUG_DIR", override)
+
+	latest, err := saveChat([]string{"[You] hi", "[Billy] hey"}, "sess-1")
+	if err != nil {
+		t.Fatalf("saveChat: %v", err)
 	}
-	if strings.HasPrefix(defaultDebugDir, "/home/") {
-		t.Fatalf("defaultDebugDir must not live under a user home: %s", defaultDebugDir)
+	if filepath.Dir(latest) != override {
+		t.Fatalf("latest dir = %s, want override %s", filepath.Dir(latest), override)
+	}
+}
+
+// The default capture directory must follow the operator's home and never be a
+// fixed path under the system temp dir. /tmp/billy/chat-log was the default from
+// 2026-08-11 until the 2026-09-08 reboot cleared /tmp and took every capture
+// taken in that window with it — temp directories do not hold critical files.
+func TestSaveChatDefaultIsNotATempDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BILLY_DEBUG_DIR", "") // force the default path
+
+	latest, err := saveChat([]string{"[You] hi", "[Billy] hey"}, "sess-1")
+	if err != nil {
+		t.Fatalf("saveChat: %v", err)
+	}
+	dir := filepath.Dir(latest)
+	if dir == "/tmp/billy/chat-log" {
+		t.Fatalf("default capture dir is the reboot-wiped temp path %s", dir)
+	}
+	if !strings.HasPrefix(dir, home+string(os.PathSeparator)) {
+		t.Fatalf("default capture dir %s is not rooted in $HOME %s", dir, home)
+	}
+}
+
+// The capture and the directory holding it must stay readable from the agent
+// account that runs "debug billy" — a different uid from the operator who saves
+// it. That reach is what the 0755/0644 modes buy. os.WriteFile does not reset
+// the mode of a file that already exists, so the overwritten "latest" pointer
+// needs the mode asserted on every save, not just on the first.
+func TestSaveChatCapturesStayAgentReadable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	debugDir := filepath.Join(t.TempDir(), "debug")
+	t.Setenv("BILLY_DEBUG_DIR", debugDir)
+
+	// Seed a private directory holding a private capture — the shape a save must
+	// widen rather than preserve.
+	if err := os.MkdirAll(debugDir, 0o700); err != nil {
+		t.Fatalf("seed debug dir: %v", err)
+	}
+	stale := filepath.Join(debugDir, "billy-chat-debug-latest.md")
+	if err := os.WriteFile(stale, []byte("stale"), 0o600); err != nil {
+		t.Fatalf("seed stale capture: %v", err)
+	}
+
+	latest, err := saveChat([]string{"[You] hi", "[Billy] hey"}, "sess-1")
+	if err != nil {
+		t.Fatalf("saveChat: %v", err)
+	}
+
+	dirInfo, err := os.Stat(debugDir)
+	if err != nil {
+		t.Fatalf("stat debug dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o755 {
+		t.Fatalf("debug dir mode = %04o, want 0755 (agent account cannot list it)", got)
+	}
+
+	archives, err := filepath.Glob(filepath.Join(debugDir, "billy-chat-2*.md"))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(archives) == 0 {
+		t.Fatalf("no archive written under %s", debugDir)
+	}
+	for _, path := range append([]string{latest}, archives...) {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if got := info.Mode().Perm(); got != 0o644 {
+			t.Fatalf("%s mode = %04o, want 0644 (agent account cannot read it)", filepath.Base(path), got)
+		}
 	}
 }
 

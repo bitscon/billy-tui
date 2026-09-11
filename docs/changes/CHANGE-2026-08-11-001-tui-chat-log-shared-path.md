@@ -1,5 +1,12 @@
 # CHANGE: Save the chat debug log to a shared path the agent account can read
 
+> **SUPERSEDED 2026-09-11** by
+> `CHANGE-2026-09-11-001-tui-durable-chat-capture-path.md`. The `/tmp/billy/chat-log`
+> default described below is no longer the behavior: the 2026-09-08 reboot cleared
+> `/tmp` and destroyed every capture taken since this change. Captures are back in
+> `~/.billy/debug`, made readable across accounts by their modes (0755 directory,
+> 0644 files) rather than by their location.
+
 Date: 2026-08-11
 Type: fix
 ADR: none
