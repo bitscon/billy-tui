@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,13 +73,15 @@ func (m *model) updateChatViewport() {
 // message logs and any in-flight streaming buffer — then refreshes the
 // viewport. Shared by the ":clear" command and the ctrl+l shortcut. A pending
 // approval dies with its transcript: its prompt block is gone, so the y/n
-// quick keys must not keep answering it invisibly.
+// quick keys must not keep answering it invisibly. A pending question goes the
+// same way, and for the same reason — the question text it refers to is gone.
 func (m *model) clearChat() {
 	m.messages = []string{}
 	m.displayMessages = []string{}
 	m.liveMsg = ""
 	m.streamBuffer = ""
 	m.pendingApproval = nil
+	m.clearPendingQuestion()
 	m.updateChatViewport()
 }
 
@@ -179,7 +182,13 @@ func approvalPromptBlock(a *ApprovalRequest) string {
 // unattributed — the TUI must never speak AS Billy, and the clean :export drops
 // them while the ctrl+s debug capture keeps them as system notes. Nil fields
 // (legacy runtime, unrouted turn) leave the transcript untouched (contract §6).
-func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRequest) {
+//
+// The reply's pending question (contract v3 §14) is adopted here too — and a
+// reply that carries NONE clears any open picker, so a stale picker can never
+// answer a newer question. It adds nothing to the transcript: the reply text the
+// runtime already rendered carries the question and its numbered list, and the
+// picker is an overlay on top of that, never a second copy of it.
+func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRequest, question *PendingQuestion) {
 	if brain != nil {
 		m.lastBrain = brain
 		line := brainRecordLine(brain)
@@ -192,6 +201,7 @@ func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRe
 		m.messages = append(m.messages, block)
 		m.displayMessages = append(m.displayMessages, ErrorStyle.Render(block))
 	}
+	m.adoptPendingQuestion(question)
 }
 
 // submitPrompt sends text to Billy exactly as an enter-key submission does —
@@ -221,6 +231,10 @@ func (m *model) submitPrompt(text string) tea.Cmd {
 	m.displayMessages = append(m.displayMessages, UserInputStyle.Render("[You] "+text))
 	m.lastPrompt = text
 	m.pendingApproval = nil
+	// Any submission closes the open question (contract v3 §15 rule 4): this
+	// text either IS the answer or supersedes it, so one choice can never be
+	// sent twice and a picker can never outlive the turn it belonged to.
+	m.clearPendingQuestion()
 	// New turn: bump the generation and open a cancelable, generously
 	// bounded context. thinking=true with isStreaming=false lets the
 	// animated "Billy is thinking…" spinner show until the first chunk
@@ -397,6 +411,158 @@ func setRoutingMode(c *billyClient, mode string) tea.Cmd {
 	}
 }
 
+// --- pending-question picker (contract v3 §14/§15) ---
+
+// The question kinds this client has to tell apart. Every other kind — the ones
+// that exist now and the ones that do not yet — travels the generic path: shown
+// verbatim, answered by the option's number.
+const (
+	questionKindDefault    = "question"
+	questionKindLift       = "lift_read_only"
+	questionKindPermission = "permission"
+)
+
+// questionTypedAnswerOnly reports whether the RUNTIME refuses to take a number
+// as this kind's answer.
+//
+// Two kinds are fenced to a typed answer, and the runtime says so in the reply
+// text: a `permission` request (where a number matches nothing at all) and a
+// `lift_read_only` question (where a number answers but never lifts the hold).
+// Both fences exist for the same reason — a bare number left over from an older
+// question on the operator's screen must never grant a privilege they did not
+// read. A picker choice is not a bare number: the operator is looking at the
+// label they highlighted. So the picker honours the fence the only way that
+// keeps the label and the effect identical — it sends the LABEL for these two
+// kinds, and the number for everything else. Sending a number here would be a
+// choice the runtime discards (permission) or one whose effect differs from the
+// label shown (lift).
+func questionTypedAnswerOnly(kind string) bool {
+	return kind == questionKindPermission || kind == questionKindLift
+}
+
+// allDigits reports whether s is a non-empty run of ASCII digits — i.e. whether
+// the runtime's answer matcher would read it as an option POSITION rather than
+// as a label.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// answerForOption is the ONE place a chosen option becomes the text that goes on
+// the wire (contract v3 §15 rule 1). sendable is false when the choice cannot be
+// expressed unambiguously — a fenced kind whose label is itself all digits,
+// which the runtime would read as a position — and the label is then returned
+// for the operator to send themselves rather than guessed at.
+func answerForOption(q *PendingQuestion, idx int) (text string, sendable bool) {
+	if q == nil || idx < 0 || idx >= len(q.Options) {
+		return "", false
+	}
+	if questionTypedAnswerOnly(q.Kind) {
+		label := strings.TrimSpace(q.Options[idx])
+		if label == "" || allDigits(label) {
+			return label, false
+		}
+		return label, true
+	}
+	return strconv.Itoa(idx + 1), true
+}
+
+// questionNumberKeys is how many options the 1..9 direct-choice keys cover. The
+// runtime admits two to four options, so in practice this is all of them; the
+// cap exists so a longer list still navigates with the arrows.
+func questionNumberKeys(q *PendingQuestion) int {
+	if q == nil {
+		return 0
+	}
+	if len(q.Options) > 9 {
+		return 9
+	}
+	return len(q.Options)
+}
+
+// In-overlay / status notices. Fixed sentences, so the picker always says the
+// same thing about the same event.
+const (
+	// permissionsCommand is the runtime's own handle, sent verbatim as the whole
+	// message by ':permissions'.
+	permissionsCommand    = "/permissions"
+	permissionsBusyNotice = "Billy is still working — try :permissions again in a moment"
+
+	questionSessionMovedNotice = "That question belonged to the previous session — nothing sent"
+	questionTypeItNotice       = "This one must be typed out — the option is in the input box, press enter to send"
+	questionBusyNotice         = "Billy is still working — the choice was not sent"
+)
+
+// adoptPendingQuestion installs the question a completed reply carried, or
+// clears the state when it carried none (contract v3 §15 rule 4 — a newer reply
+// replaces the open picker outright). The session is recorded with it, because
+// the runtime matches an answer only on the session the question was asked on.
+func (m *model) adoptPendingQuestion(q *PendingQuestion) {
+	m.questionPickerIdx = 0
+	m.pendingQuestion = q
+	if q == nil {
+		m.questionPickerMode = false
+		m.questionSession = ""
+		return
+	}
+	m.questionSession = m.client.sessionID
+	m.questionPickerMode = true
+}
+
+// clearPendingQuestion drops the question and closes its picker. Called whenever
+// the question stops being answerable — a submission (the answer itself, or
+// anything that supersedes it), a cleared transcript, a new session.
+func (m *model) clearPendingQuestion() {
+	m.pendingQuestion = nil
+	m.questionPickerMode = false
+	m.questionPickerIdx = 0
+	m.questionSession = ""
+}
+
+// chooseQuestionOption answers the open question with the option at idx, over
+// the same send path a typed message uses. It sends nothing at all when the
+// choice cannot be honoured honestly: no question, a session that has moved on,
+// a turn still in flight, or a label that cannot be expressed on the wire.
+func (m *model) chooseQuestionOption(idx int) tea.Cmd {
+	q := m.pendingQuestion
+	if q == nil || idx < 0 || idx >= len(q.Options) {
+		m.questionPickerMode = false
+		return nil
+	}
+	// Same session, always (contract v3 §15 rule 2): the runtime would match
+	// this answer against nothing, so it is never sent.
+	if m.questionSession != m.client.sessionID {
+		m.clearPendingQuestion()
+		m.saveStatus = questionSessionMovedNotice
+		m.saveStatusTicks = 4
+		return nil
+	}
+	if m.thinking || m.isStreaming {
+		m.saveStatus = questionBusyNotice
+		m.saveStatusTicks = 4
+		return nil
+	}
+	text, sendable := answerForOption(q, idx)
+	if !sendable {
+		m.questionPickerMode = false
+		if text != "" && m.input.Value() == "" {
+			m.input.SetValue(text)
+			m.refreshInputHeight()
+		}
+		m.saveStatus = questionTypeItNotice
+		m.saveStatusTicks = 4
+		return nil
+	}
+	return m.submitPrompt(text)
+}
+
 // setModel switches the active model via the sanctioned operator API. When
 // switching within the same provider it preserves the operator's current
 // base_url, so a custom host (e.g. a remote ollama) is not reset to the
@@ -474,6 +640,22 @@ func (m *model) execCommand(raw string) tea.Cmd {
 		m.saveStatus = "Switching routing…"
 		m.saveStatusTicks = 4
 		return setRoutingMode(m.client, mode)
+	case "permissions":
+		// ':permissions' sends the runtime's OWN handle as the whole message
+		// (contract v3 §15 rule 6) — its recognizer accepts nothing else, and
+		// the client holds no knowledge of sources or settings: the reply's
+		// pending question drives the picker, and so does the second step's.
+		if len(parts) > 1 {
+			m.saveStatus = "Usage: :permissions"
+			m.saveStatusTicks = 4
+			return nil
+		}
+		if m.thinking || m.isStreaming {
+			m.saveStatus = permissionsBusyNotice
+			m.saveStatusTicks = 4
+			return nil
+		}
+		return m.submitPrompt(permissionsCommand)
 	case "clear", "c":
 		m.clearChat()
 	case "export", "e":
@@ -489,7 +671,10 @@ func (m *model) execCommand(raw string) tea.Cmd {
 			m.client.sessionID = fmt.Sprintf("tui-%d", time.Now().UnixNano())
 			// A pending approval belongs to the old session; the new one must
 			// not start with y/n silently answering a question it never asked.
+			// The same goes for a pending question — the runtime matches an
+			// answer only on the session it was asked on (contract v3 §15).
 			m.pendingApproval = nil
+			m.clearPendingQuestion()
 			short := truncate(m.client.sessionID, 20)
 			m.saveStatus = "✓ New session: " + short
 			m.saveStatusTicks = 4
@@ -715,7 +900,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rendered := m.renderResponse(msg.text)
 		m.messages = append(m.messages, "[Billy] "+msg.text)
 		m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
-		m.recordConductorSurfaces(msg.Brain, msg.Approval)
+		m.recordConductorSurfaces(msg.Brain, msg.Approval, msg.Question)
 		m.thinking = false
 		m.liveMsg = ""
 		m.lastLatency = time.Since(m.requestStarted)
@@ -776,7 +961,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// report the same count for the same reply.
 			m.sidebar.lastTokens = len(msg.FullText) / 4
 		}
-		m.recordConductorSurfaces(msg.Brain, msg.Approval)
+		m.recordConductorSurfaces(msg.Brain, msg.Approval, msg.Question)
 		m.liveMsg = ""
 		m.streamBuffer = ""
 		m.isStreaming = false
@@ -1042,6 +1227,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, setRoutingMode(m.client, mode)
 			case "esc", "ctrl+c":
 				m.routingPickerMode = false
+			}
+			return m, nil
+		}
+
+		// ── pending-question picker: navigate / choose / close (contract v3 §15) ──
+		if m.questionPickerMode && m.pendingQuestion != nil {
+			key := msg.String()
+			switch key {
+			case "up", "k":
+				if m.questionPickerIdx > 0 {
+					m.questionPickerIdx--
+				}
+			case "down", "j":
+				if m.questionPickerIdx < len(m.pendingQuestion.Options)-1 {
+					m.questionPickerIdx++
+				}
+			case "enter":
+				return m, m.chooseQuestionOption(m.questionPickerIdx)
+			case "esc", "ctrl+c":
+				// Esc IS NOT AN ANSWER (contract v3 §15 rule 3): nothing goes on
+				// the wire. The question stays answerable — the reply text still
+				// carries its numbered list, and the input box takes a typed
+				// number or the option itself.
+				m.questionPickerMode = false
+			default:
+				// The number keys choose directly. Bounded by the option count,
+				// so a key beyond the list does nothing at all rather than
+				// landing on some other option.
+				if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
+					if idx := int(key[0] - '1'); idx < questionNumberKeys(m.pendingQuestion) {
+						m.questionPickerIdx = idx
+						return m, m.chooseQuestionOption(idx)
+					}
+				}
 			}
 			return m, nil
 		}

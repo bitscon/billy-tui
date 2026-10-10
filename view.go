@@ -33,6 +33,7 @@ var helpContent = strings.TrimSpace(`
   ctrl+j        Newline (multi-line input)
   esc           Abandon the reply Billy is generating
   y / n         Approve / decline when Billy asks (or type a reply)
+  1…9 / enter   Choose when Billy offers you options (esc closes, sends nothing)
   ↑ / ↓         Cycle input history
   tab           Toggle scroll / input focus
   page up/dn    Scroll chat
@@ -55,6 +56,7 @@ var helpContent = strings.TrimSpace(`
   :routing      Show/toggle auto-routing (interactive)
   :routing MODE Set routing to auto or pinned
   :brains       Brain floors — view/set each role's minimum brain
+  :permissions  What the cloud brain may read — view and change
   :help         Show this screen
 `)
 
@@ -162,7 +164,7 @@ func (m model) View() string {
 			": " + m.commandInput.View(),
 		)
 		hintRow = HintBarStyle.Width(m.width).Render(
-			"enter execute  esc cancel  :model  :routing  :brains  :clear  :export  :session new  :help",
+			"enter execute  esc cancel  :model  :routing  :brains  :permissions  :clear  :export  :session new  :help",
 		)
 	} else {
 		focusIndicator := "─"
@@ -302,6 +304,43 @@ func (m model) View() string {
 		)
 	}
 
+	// ── pending-question picker overlay (contract v3 §14/§15) ─────────────────
+	if m.questionPickerMode && m.pendingQuestion != nil {
+		q := m.pendingQuestion
+		wrap := lipgloss.NewStyle().Width(questionWrapWidth(m.width))
+
+		var b strings.Builder
+		b.WriteString(SectionHeaderStyle.Render(questionPickerTitle) + "\n")
+		b.WriteString(DimStyle.Render(questionPickerHint(q)) + "\n\n")
+		// The question in the brain's OWN words, and the labels as sent —
+		// verbatim, never re-worded, re-ordered or truncated (contract v3 §15
+		// rule 5). The number shown against each option IS the number the
+		// runtime matches, because the list is never filtered.
+		b.WriteString(wrap.Render(q.Question) + "\n")
+		if subject := questionSubjectLine(q); subject != "" {
+			b.WriteString(DimStyle.Render(wrap.Render(subject)) + "\n")
+		}
+		b.WriteString("\n")
+		for i, opt := range q.Options {
+			line := fmt.Sprintf("%d. %s", i+1, opt)
+			if i == m.questionPickerIdx {
+				b.WriteString(UserInputStyle.Render("▸ "+line) + "\n")
+			} else {
+				b.WriteString("  " + line + "\n")
+			}
+		}
+		if note := questionPickerNote(q); note != "" {
+			b.WriteString("\n" + DimStyle.Render(wrap.Render(note)) + "\n")
+		}
+		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
+		return lipgloss.Place(
+			m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			overlay,
+			lipgloss.WithWhitespaceBackground(lipgloss.AdaptiveColor{Dark: "#111111", Light: "#DDDDDD"}),
+		)
+	}
+
 	// ── help overlay ─────────────────────────────────────────────────────────
 	if m.showHelp {
 		overlay := HelpOverlayStyle.Render(helpContent)
@@ -347,3 +386,60 @@ func modelPickerWindow(idx, total, termHeight int) (start, end int) {
 
 // DimStyle is a convenience alias exposed for update.go hint text.
 var DimStyle = lipgloss.NewStyle().Foreground(colorSubtle)
+
+// --- pending-question picker rendering (contract v3 §14/§15) ---
+
+// questionPickerTitle is deliberately generic: the picker is the same screen for
+// every kind of question, and the question's own words say what it is about.
+const questionPickerTitle = "Billy needs an answer"
+
+// questionWrapWidth bounds the wrap width of the question text inside the
+// overlay so a long sentence does not run off a wide terminal or overflow a
+// narrow one.
+func questionWrapWidth(termWidth int) int {
+	w := termWidth - 8
+	if w > 72 {
+		w = 72
+	}
+	if w < 24 {
+		w = 24
+	}
+	return w
+}
+
+// questionPickerHint is the key line under the title.
+func questionPickerHint(q *PendingQuestion) string {
+	keys := "↑/↓ move · enter choose"
+	if n := questionNumberKeys(q); n > 1 {
+		keys = fmt.Sprintf("↑/↓ move · 1–%d choose · enter choose", n)
+	}
+	return keys + " · esc close (nothing sent)"
+}
+
+// questionSubjectLine names what a permission request is about, from the
+// runtime's own structured fields — never parsed out of the sentence, and empty
+// on every kind that sends neither.
+func questionSubjectLine(q *PendingQuestion) string {
+	switch {
+	case q.Tool != "" && q.Target != "":
+		return q.Tool + " · " + q.Target
+	case q.Tool != "":
+		return q.Tool
+	default:
+		return q.Target
+	}
+}
+
+// questionPickerNote is the one line under the options that says how THIS
+// question is answered, where that differs from the ordinary case. Empty
+// otherwise — the picker adds no commentary of its own to a plain choice.
+func questionPickerNote(q *PendingQuestion) string {
+	switch {
+	case questionTypedAnswerOnly(q.Kind):
+		return "This one is answered by the words, not a number — choosing sends the option exactly as written."
+	case q.AllowFreeText:
+		return "Your own words work too — close this and type them."
+	default:
+		return ""
+	}
+}

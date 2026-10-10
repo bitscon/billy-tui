@@ -68,6 +68,17 @@ type model struct {
 	routingPickerMode bool
 	routingPickerIdx  int
 
+	// pending-question picker (contract v3 §14/§15). pendingQuestion is the
+	// structured choice the NEWEST reply carried — every completed reply
+	// replaces it, and one carrying none clears it, so a stale picker can never
+	// answer a newer question. questionSession records the session it arrived
+	// on: the runtime matches an answer only on that session, so a choice is
+	// never sent after ':session new' has moved on.
+	pendingQuestion    *PendingQuestion
+	questionPickerMode bool
+	questionPickerIdx  int
+	questionSession    string
+
 	// brain-floor screen (':brains' command, Modernization 5). floors stays nil
 	// while loading and on a runtime without the surface — the screen is then
 	// read-only and never writes (contract v2 §8 gate).
@@ -143,6 +154,23 @@ type BrainReport struct {
 	EffectiveTier      string `json:"effective_tier"`
 }
 
+// PendingQuestion mirrors the runtime's PendingQuestion model (contract v3
+// §14/§16) — a structured choice the operator is being asked to make. Nil means
+// nothing pending: the field was absent, null, or carried a shape the contract
+// does not admit (v3 §13 rule 6). Decoded by decodePendingQuestion, never
+// straight into the reply struct, so a malformed question can never cost the
+// operator the reply it arrived with.
+type PendingQuestion struct {
+	QuestionID    string   `json:"question_id"`
+	Question      string   `json:"question"`
+	Options       []string `json:"options"`
+	AllowFreeText bool     `json:"allow_free_text"`
+	Kind          string   `json:"kind"`   // "" reads as questionKindDefault
+	Tool          string   `json:"tool"`   // permission kind only
+	Target        string   `json:"target"` // permission kind only
+	Source        string   `json:"source"` // consent kinds only
+}
+
 // ApprovalRequest marks a reply that waits on the operator's yes/no.
 // Nil = nothing pending.
 type ApprovalRequest struct {
@@ -159,6 +187,7 @@ type responseMsg struct {
 	text     string
 	Brain    *BrainReport     // nil on legacy runtimes / non-routed turns (contract §1)
 	Approval *ApprovalRequest // nil = nothing awaits the operator
+	Question *PendingQuestion // nil = no structured choice pending (contract v3 §14)
 	Gen      int
 }
 type errMsg struct {
@@ -227,6 +256,7 @@ type StreamDoneMsg struct {
 	FullText string
 	Brain    *BrainReport     // nil on legacy runtimes / non-routed turns (contract §1)
 	Approval *ApprovalRequest // nil = nothing awaits the operator
+	Question *PendingQuestion // nil = no structured choice pending (contract v3 §14)
 	Gen      int
 }
 type StreamErrMsg struct {

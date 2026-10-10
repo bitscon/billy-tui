@@ -74,6 +74,10 @@ type streamEvent struct {
 	// Nil whenever the runtime sent none — the legacy stream shape.
 	Brain    *BrainReport
 	Approval *ApprovalRequest
+	// The structured pending question (contract v3 §14), also delivered on the
+	// Done event. Nil whenever the runtime sent none, or sent one the contract
+	// does not admit.
+	Question *PendingQuestion
 }
 
 // unixBaseURL is the fixed authority used for requests over the Unix socket.
@@ -162,6 +166,51 @@ type askResult struct {
 	Message  string
 	Brain    *BrainReport
 	Approval *ApprovalRequest
+	Question *PendingQuestion
+}
+
+// decodePendingQuestion parses the raw pending_question field into a question
+// the client may offer, or nil for "nothing pending" (contract v3 §13 rule 6).
+//
+// EVERY rejection is nil, never an error. The field is additive and
+// operator-facing: the runtime drops a question it cannot guard rather than
+// failing the reply, and the client does the same in reverse — a malformed
+// question must never cost the operator the reply it arrived with. That is why
+// the field is decoded from json.RawMessage here instead of straight into the
+// reply struct, where a non-object would have failed the whole body (and, on
+// the stream, killed the turn mid-reply).
+//
+// The option list is taken EXACTLY as sent — never filtered, reordered or
+// renumbered. A 1-based position in this list is what the operator's numeric
+// answer means to the runtime, so dropping even a blank entry would silently
+// renumber every option after it; a list with a blank entry is refused whole,
+// the same way the runtime's own guard refuses it.
+func decodePendingQuestion(raw json.RawMessage) *PendingQuestion {
+	if len(raw) == 0 {
+		return nil
+	}
+	var q PendingQuestion
+	if err := json.Unmarshal(raw, &q); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(q.QuestionID) == "" || strings.TrimSpace(q.Question) == "" {
+		return nil
+	}
+	// Two is the runtime's own floor (ASK_OPERATOR_MIN_OPTIONS); there is no
+	// ceiling here on purpose, so a runtime that later admits a fifth option
+	// still arms a picker rather than being silently ignored.
+	if len(q.Options) < 2 {
+		return nil
+	}
+	for _, opt := range q.Options {
+		if strings.TrimSpace(opt) == "" {
+			return nil
+		}
+	}
+	if strings.TrimSpace(q.Kind) == "" {
+		q.Kind = questionKindDefault
+	}
+	return &q
 }
 
 // doAsk performs a blocking (non-streaming) turn against /ask using the pooled
@@ -186,11 +235,17 @@ func (c *billyClient) doAsk(prompt string) (askResult, error) {
 		Message  string           `json:"message"`
 		Brain    *BrainReport     `json:"brain"`
 		Approval *ApprovalRequest `json:"approval"`
+		Question json.RawMessage  `json:"pending_question"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return askResult{}, err
 	}
-	return askResult{Message: result.Message, Brain: result.Brain, Approval: result.Approval}, nil
+	return askResult{
+		Message:  result.Message,
+		Brain:    result.Brain,
+		Approval: result.Approval,
+		Question: decodePendingQuestion(result.Question),
+	}, nil
 }
 
 func ask(c *billyClient, prompt string, gen int) tea.Cmd {
@@ -202,7 +257,7 @@ func ask(c *billyClient, prompt string, gen int) tea.Cmd {
 			}
 			return errMsg{text: "⚠️  " + err.Error(), Gen: gen}
 		}
-		return responseMsg{text: res.Message, Brain: res.Brain, Approval: res.Approval, Gen: gen}
+		return responseMsg{text: res.Message, Brain: res.Brain, Approval: res.Approval, Question: res.Question, Gen: gen}
 	}
 }
 
@@ -251,6 +306,12 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 		// arrived on (contract §3 — first non-null wins).
 		var brain *BrainReport
 		var approval *ApprovalRequest
+		// The pending question does NOT ride the terminal frame: the runtime
+		// gives it a frame of its own, after the message frames and before the
+		// terminal one, with an empty chunk and done:false (contract v3 §14).
+		// So it is remembered off whichever frame carries it, like brain and
+		// approval, and handed to the Done event — first non-nil wins.
+		var question *PendingQuestion
 		scanner := bufio.NewScanner(resp.Body)
 		// The runtime sends each SSE frame as one "data: {…}" line, and a frame can
 		// carry a very large chunk (the server generates the whole reply, then
@@ -275,6 +336,7 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 				Done     bool             `json:"done"`
 				Brain    *BrainReport     `json:"brain"`
 				Approval *ApprovalRequest `json:"approval"`
+				Question json.RawMessage  `json:"pending_question"`
 			}
 			if err := json.Unmarshal([]byte(payloadRaw), &payload); err != nil {
 				events <- streamEvent{Err: err, Done: true}
@@ -287,12 +349,15 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 			if approval == nil {
 				approval = payload.Approval
 			}
+			if question == nil {
+				question = decodePendingQuestion(payload.Question)
+			}
 			if payload.Chunk != "" {
 				fullText.WriteString(payload.Chunk)
 				events <- streamEvent{Chunk: payload.Chunk}
 			}
 			if payload.Done {
-				events <- streamEvent{Done: true, FullText: fullText.String(), Brain: brain, Approval: approval}
+				events <- streamEvent{Done: true, FullText: fullText.String(), Brain: brain, Approval: approval, Question: question}
 				return
 			}
 		}
@@ -312,7 +377,7 @@ func nextStreamMessage(events <-chan streamEvent, prompt string, gen int) tea.Ms
 		return StreamErrMsg{Prompt: prompt, Err: event.Err, Gen: gen}
 	}
 	if event.Done {
-		return StreamDoneMsg{FullText: event.FullText, Brain: event.Brain, Approval: event.Approval, Gen: gen}
+		return StreamDoneMsg{FullText: event.FullText, Brain: event.Brain, Approval: event.Approval, Question: event.Question, Gen: gen}
 	}
 	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, Gen: gen, events: events}
 }
