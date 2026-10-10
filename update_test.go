@@ -791,3 +791,500 @@ func TestFloorScreenEscCloses(t *testing.T) {
 		t.Fatalf("esc should close the floor screen")
 	}
 }
+
+// ── the pending-question picker (contract v3 §14/§15) ────────────────────────
+
+// testConsentQuestion is a cloud-read consent question: four options, no free
+// text, a kind whose answer the runtime matches by number.
+func testConsentQuestion() *PendingQuestion {
+	return &PendingQuestion{
+		QuestionID:    "consentq-1",
+		Question:      "Reading your Kanboard board means sending it to the cloud brain. What should I do?",
+		Options:       []string{"Allow once", "Allow for this conversation", "Always allow", "Don't allow"},
+		AllowFreeText: false,
+		Kind:          "cloud_read_consent",
+		Source:        "board",
+	}
+}
+
+// A reply carrying a question opens the picker on the first option and records
+// the session it arrived on. A newer reply REPLACES it; a reply carrying none
+// closes it (contract v3 §15 rule 4).
+func TestPendingQuestionOpensPickerAndNewerReplyReplacesIt(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	next, _ := m.Update(responseMsg{text: "pick one", Question: testConsentQuestion(), Gen: 0})
+	nm := next.(model)
+	if nm.pendingQuestion == nil || !nm.questionPickerMode {
+		t.Fatalf("picker did not open: q=%+v open=%v", nm.pendingQuestion, nm.questionPickerMode)
+	}
+	if nm.questionPickerIdx != 0 {
+		t.Fatalf("picker must open on the first option, got idx %d", nm.questionPickerIdx)
+	}
+	if nm.questionSession != "tui-1" {
+		t.Fatalf("questionSession = %q, want %q", nm.questionSession, "tui-1")
+	}
+
+	// The question is NOT copied into the transcript — the runtime's own reply
+	// text already carries it and its numbered list.
+	for _, line := range nm.messages {
+		if strings.Contains(line, "Allow for this conversation") && !strings.HasPrefix(line, "[Billy] ") {
+			t.Fatalf("picker must not add its own transcript block: %q", line)
+		}
+	}
+
+	// A newer reply with a different question replaces the open one.
+	nm.questionPickerIdx = 3
+	newer := &PendingQuestion{QuestionID: "q-2", Question: "Which one?", Options: []string{"a", "b"}, Kind: "question"}
+	next2, _ := nm.Update(responseMsg{text: "and now this", Question: newer, Gen: 0})
+	nm2 := next2.(model)
+	if nm2.pendingQuestion == nil || nm2.pendingQuestion.QuestionID != "q-2" {
+		t.Fatalf("newer reply did not replace the question: %+v", nm2.pendingQuestion)
+	}
+	if nm2.questionPickerIdx != 0 {
+		t.Fatalf("a replaced picker must reset the selection, got idx %d", nm2.questionPickerIdx)
+	}
+
+	// A reply carrying no question closes the picker outright.
+	next3, _ := nm2.Update(responseMsg{text: "all done", Gen: 0})
+	nm3 := next3.(model)
+	if nm3.pendingQuestion != nil || nm3.questionPickerMode {
+		t.Fatalf("a reply with no question must close the picker: q=%+v open=%v", nm3.pendingQuestion, nm3.questionPickerMode)
+	}
+}
+
+// The same holds on the streaming path — the question rides its own frame but
+// lands on the done message.
+func TestStreamDoneMsgOpensPicker(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	next, _ := m.Update(StreamDoneMsg{FullText: "pick one", Question: testConsentQuestion(), Gen: 0})
+	nm := next.(model)
+	if nm.pendingQuestion == nil || !nm.questionPickerMode {
+		t.Fatalf("streamed question did not open the picker")
+	}
+}
+
+// Arrow keys and j/k move the selection and clamp at both ends; nothing is sent
+// while navigating.
+func TestQuestionPickerNavigationClamps(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1"
+	m.questionPickerMode = true
+
+	step := func(mm model, key string) model {
+		next, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		if cmd != nil {
+			t.Fatalf("navigation must not send anything (key %q)", key)
+		}
+		return next.(model)
+	}
+	m = step(m, "k") // already at the top
+	if m.questionPickerIdx != 0 {
+		t.Fatalf("up at the top must clamp, got %d", m.questionPickerIdx)
+	}
+	m = step(m, "j")
+	m = step(m, "j")
+	if m.questionPickerIdx != 2 {
+		t.Fatalf("idx = %d, want 2", m.questionPickerIdx)
+	}
+	m = step(m, "j")
+	m = step(m, "j") // already at the bottom
+	if m.questionPickerIdx != 3 {
+		t.Fatalf("down at the bottom must clamp, got %d", m.questionPickerIdx)
+	}
+	m = step(m, "k")
+	if m.questionPickerIdx != 2 {
+		t.Fatalf("idx = %d, want 2", m.questionPickerIdx)
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		t.Fatalf("arrow navigation must not send anything")
+	}
+	if next.(model).questionPickerIdx != 3 {
+		t.Fatalf("down arrow did not move the selection")
+	}
+}
+
+// Enter sends the selected option's NUMBER, on the same session, as an ordinary
+// submission: a [You] line, a real turn, and the picker closed so the choice
+// cannot be sent twice.
+func TestQuestionPickerEnterSendsTheOptionNumber(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1"
+	m.questionPickerMode = true
+	m.questionPickerIdx = 2 // "Always allow" → "3"
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd == nil {
+		t.Fatalf("enter must send the answer")
+	}
+	if got := nm.messages[len(nm.messages)-1]; got != "[You] 3" {
+		t.Fatalf("sent %q, want %q", got, "[You] 3")
+	}
+	if nm.lastPrompt != "3" {
+		t.Fatalf("lastPrompt = %q, want %q", nm.lastPrompt, "3")
+	}
+	if nm.client.sessionID != "tui-1" {
+		t.Fatalf("the answer must go on the question's own session, got %q", nm.client.sessionID)
+	}
+	if nm.pendingQuestion != nil || nm.questionPickerMode {
+		t.Fatalf("a sent choice must close the picker")
+	}
+	if !nm.thinking {
+		t.Fatalf("the answer must start a real turn")
+	}
+}
+
+// The number keys choose directly. A key beyond the option list does nothing at
+// all — it never lands on some other option.
+func TestQuestionPickerNumberKeys(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1"
+	m.questionPickerMode = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
+	nm := next.(model)
+	if cmd == nil {
+		t.Fatalf("a number key must send the answer")
+	}
+	if got := nm.messages[len(nm.messages)-1]; got != "[You] 4" {
+		t.Fatalf("sent %q, want %q", got, "[You] 4")
+	}
+
+	m2 := initialModel(&billyClient{sessionID: "tui-1"})
+	m2.pendingQuestion = &PendingQuestion{QuestionID: "q-1", Question: "Which?", Options: []string{"a", "b"}, Kind: "question"}
+	m2.questionSession = "tui-1"
+	m2.questionPickerMode = true
+	next2, cmd2 := m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	nm2 := next2.(model)
+	if cmd2 != nil {
+		t.Fatalf("a number past the option list must send nothing")
+	}
+	if len(nm2.messages) != 0 || nm2.questionPickerIdx != 0 || !nm2.questionPickerMode {
+		t.Fatalf("a number past the list must change nothing: msgs=%q idx=%d open=%v",
+			nm2.messages, nm2.questionPickerIdx, nm2.questionPickerMode)
+	}
+}
+
+// Esc closes the picker and SENDS NOTHING. The question stays answerable, so
+// the state survives and a typed number still works (contract v3 §15 rule 3).
+func TestQuestionPickerEscSendsNothing(t *testing.T) {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyCtrlC}} {
+		m := initialModel(&billyClient{sessionID: "tui-1"})
+		m.pendingQuestion = testConsentQuestion()
+		m.questionSession = "tui-1"
+		m.questionPickerMode = true
+		m.questionPickerIdx = 1
+
+		next, cmd := m.Update(key)
+		nm := next.(model)
+		if cmd != nil {
+			t.Fatalf("%v must send nothing", key)
+		}
+		if len(nm.messages) != 0 {
+			t.Fatalf("%v must not put anything in the transcript: %q", key, nm.messages)
+		}
+		if nm.questionPickerMode {
+			t.Fatalf("%v must close the picker", key)
+		}
+		if nm.pendingQuestion == nil {
+			t.Fatalf("%v must leave the question answerable", key)
+		}
+		if nm.thinking || nm.isStreaming {
+			t.Fatalf("%v must not start a turn", key)
+		}
+	}
+}
+
+// A permission request and a read-only lift are the two kinds the runtime
+// fences to a TYPED answer — a number answers neither honestly. The picker
+// sends the option label, verbatim, for exactly those two.
+func TestQuestionPickerFencedKindsSendTheLabel(t *testing.T) {
+	cases := []struct {
+		kind string
+		opts []string
+		want string
+	}{
+		{questionKindPermission, []string{"allow once", "allow for this session", "deny"}, "allow for this session"},
+		{questionKindLift, []string{"approve", "keep it read-only"}, "keep it read-only"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.kind, func(t *testing.T) {
+			m := initialModel(&billyClient{sessionID: "tui-1"})
+			m.pendingQuestion = &PendingQuestion{
+				QuestionID: "q-1", Question: "May I?", Options: tc.opts, Kind: tc.kind,
+			}
+			m.questionSession = "tui-1"
+			m.questionPickerMode = true
+			m.questionPickerIdx = 1
+
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			nm := next.(model)
+			if cmd == nil {
+				t.Fatalf("enter must send the answer")
+			}
+			if got := nm.messages[len(nm.messages)-1]; got != "[You] "+tc.want {
+				t.Fatalf("sent %q, want %q — the label shown must be the text sent", got, "[You] "+tc.want)
+			}
+		})
+	}
+}
+
+// A fenced kind whose label is itself all digits cannot be expressed on the
+// wire (the runtime would read it as a position), so the picker sends NOTHING
+// and hands the label to the input box for the operator to send.
+func TestQuestionPickerFencedAllDigitLabelSendsNothing(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	m.pendingQuestion = &PendingQuestion{
+		QuestionID: "q-1", Question: "Which port?", Options: []string{"8080", "9090"},
+		Kind: questionKindPermission,
+	}
+	m.questionSession = "tui-1"
+	m.questionPickerMode = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("an ambiguous label must not be sent")
+	}
+	if len(nm.messages) != 0 {
+		t.Fatalf("nothing must reach the transcript: %q", nm.messages)
+	}
+	if nm.input.Value() != "8080" {
+		t.Fatalf("input = %q, want the label %q", nm.input.Value(), "8080")
+	}
+	if nm.saveStatus != questionTypeItNotice {
+		t.Fatalf("status = %q, want the type-it notice", nm.saveStatus)
+	}
+}
+
+// An answer is only ever sent on the session the question arrived on. After
+// ':session new' the picker sends nothing and says why.
+func TestQuestionPickerRefusesAChangedSession(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-2"})
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1" // the question belonged to the previous session
+	m.questionPickerMode = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("a choice must never be sent on another session")
+	}
+	if len(nm.messages) != 0 {
+		t.Fatalf("nothing must reach the transcript: %q", nm.messages)
+	}
+	if nm.pendingQuestion != nil || nm.questionPickerMode {
+		t.Fatalf("the stale question must be dropped")
+	}
+	if nm.saveStatus != questionSessionMovedNotice {
+		t.Fatalf("status = %q, want the session-moved notice", nm.saveStatus)
+	}
+}
+
+// A choice is not sent into a turn that is still running.
+func TestQuestionPickerRefusesWhileBusy(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1"
+	m.questionPickerMode = true
+	m.isStreaming = true
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil || len(nm.messages) != 0 {
+		t.Fatalf("a choice must not be sent while a turn is in flight")
+	}
+	if nm.saveStatus != questionBusyNotice {
+		t.Fatalf("status = %q, want the busy notice", nm.saveStatus)
+	}
+}
+
+// ':session new' and a cleared transcript both drop the question — the runtime
+// matches an answer only on its own session, and a cleared transcript no longer
+// shows the question the picker refers to.
+func TestSessionNewAndClearDropThePendingQuestion(t *testing.T) {
+	for _, cmdText := range []string{"session new", "clear"} {
+		m := initialModel(&billyClient{sessionID: "tui-1"})
+		m.pendingQuestion = testConsentQuestion()
+		m.questionSession = "tui-1"
+		m.questionPickerMode = true
+
+		m.execCommand(cmdText)
+		if m.pendingQuestion != nil || m.questionPickerMode || m.questionSession != "" {
+			t.Fatalf(":%s must drop the pending question: q=%+v open=%v session=%q",
+				cmdText, m.pendingQuestion, m.questionPickerMode, m.questionSession)
+		}
+	}
+}
+
+// A typed submission closes the picker too, so one question can never be
+// answered twice.
+func TestTypedSubmissionClosesThePicker(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1"
+	m.questionPickerMode = false // operator pressed esc, then typed
+	m.input.SetValue("2")
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd == nil {
+		t.Fatalf("a typed answer must still submit")
+	}
+	if got := nm.messages[len(nm.messages)-1]; got != "[You] 2" {
+		t.Fatalf("sent %q, want %q", got, "[You] 2")
+	}
+	if nm.pendingQuestion != nil {
+		t.Fatalf("a submission must close the open question")
+	}
+}
+
+// ':permissions' sends exactly '/permissions' as the whole message — the
+// runtime's own recognizer accepts nothing else. An argument is refused locally
+// and sends nothing.
+func TestPermissionsCommandSendsExactlyThatMessage(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	cmd := m.execCommand("permissions")
+	if cmd == nil {
+		t.Fatalf(":permissions must send a turn")
+	}
+	if got := m.messages[len(m.messages)-1]; got != "[You] /permissions" {
+		t.Fatalf("sent %q, want %q", got, "[You] /permissions")
+	}
+	if m.lastPrompt != "/permissions" {
+		t.Fatalf("lastPrompt = %q, want %q", m.lastPrompt, "/permissions")
+	}
+
+	m2 := initialModel(&billyClient{sessionID: "tui-1"})
+	if cmd := m2.execCommand("permissions board"); cmd != nil {
+		t.Fatalf("an argument must not be sent to the runtime")
+	}
+	if len(m2.messages) != 0 {
+		t.Fatalf("nothing must reach the transcript: %q", m2.messages)
+	}
+	if m2.saveStatus != "Usage: :permissions" {
+		t.Fatalf("status = %q, want the usage line", m2.saveStatus)
+	}
+
+	m3 := initialModel(&billyClient{sessionID: "tui-1"})
+	m3.thinking = true
+	if cmd := m3.execCommand("permissions"); cmd != nil {
+		t.Fatalf(":permissions must not fire into a running turn")
+	}
+	if m3.saveStatus != permissionsBusyNotice {
+		t.Fatalf("status = %q, want the busy notice", m3.saveStatus)
+	}
+}
+
+// answerForOption is the one place a choice becomes wire text. This pins every
+// row of the contract's §15 rule 1.
+func TestAnswerForOption(t *testing.T) {
+	ordinary := &PendingQuestion{Options: []string{"Allow once", "Don't allow"}, Kind: "cloud_read_consent"}
+	perm := &PendingQuestion{Options: []string{"allow once", "deny"}, Kind: questionKindPermission}
+	lift := &PendingQuestion{Options: []string{"approve", "no"}, Kind: questionKindLift}
+	digits := &PendingQuestion{Options: []string{"8080", "9090"}, Kind: questionKindPermission}
+
+	cases := []struct {
+		name     string
+		q        *PendingQuestion
+		idx      int
+		want     string
+		sendable bool
+	}{
+		{"ordinary first", ordinary, 0, "1", true},
+		{"ordinary second", ordinary, 1, "2", true},
+		{"permission label", perm, 1, "deny", true},
+		{"lift label", lift, 0, "approve", true},
+		{"fenced all-digit label", digits, 0, "8080", false},
+		{"nil question", nil, 0, "", false},
+		{"index below range", ordinary, -1, "", false},
+		{"index past range", ordinary, 2, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, sendable := answerForOption(tc.q, tc.idx)
+			if got != tc.want || sendable != tc.sendable {
+				t.Fatalf("answerForOption = (%q, %v), want (%q, %v)", got, sendable, tc.want, tc.sendable)
+			}
+		})
+	}
+}
+
+// The degradation matrix (contract v3 §17), row by row, from the reply the
+// client receives to what it does about it.
+func TestPendingQuestionDegradationMatrix(t *testing.T) {
+	cases := []struct {
+		row        string
+		question   *PendingQuestion
+		session    string // the client's session when the choice is made
+		wantPicker bool
+		wantSent   string // "" = nothing goes on the wire
+	}{
+		{
+			row:        "legacy runtime / ordinary turn — nothing pending",
+			question:   nil,
+			session:    "tui-1",
+			wantPicker: false,
+		},
+		{
+			row:        "kind takes a number — the number is sent",
+			question:   testConsentQuestion(),
+			session:    "tui-1",
+			wantPicker: true,
+			wantSent:   "1",
+		},
+		{
+			row:        "fenced kind — the label is sent, never a number",
+			question:   &PendingQuestion{QuestionID: "q", Question: "May I?", Options: []string{"allow once", "deny"}, Kind: questionKindPermission},
+			session:    "tui-1",
+			wantPicker: true,
+			wantSent:   "allow once",
+		},
+		{
+			row:        "fenced kind, all-digit label — nothing is sent",
+			question:   &PendingQuestion{QuestionID: "q", Question: "Which?", Options: []string{"8080", "9090"}, Kind: questionKindPermission},
+			session:    "tui-1",
+			wantPicker: true,
+		},
+		{
+			row:        "session moved on — nothing is sent",
+			question:   testConsentQuestion(),
+			session:    "tui-9",
+			wantPicker: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.row, func(t *testing.T) {
+			m := initialModel(&billyClient{sessionID: "tui-1"})
+			next, _ := m.Update(responseMsg{text: "reply", Question: tc.question, Gen: 0})
+			m = next.(model)
+			if m.questionPickerMode != tc.wantPicker {
+				t.Fatalf("picker open = %v, want %v", m.questionPickerMode, tc.wantPicker)
+			}
+			if !tc.wantPicker {
+				return
+			}
+			m.client.sessionID = tc.session
+			before := len(m.messages)
+			next2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m2 := next2.(model)
+			if tc.wantSent == "" {
+				if cmd != nil || len(m2.messages) != before {
+					t.Fatalf("expected nothing on the wire, got cmd=%v messages=%q", cmd != nil, m2.messages[before:])
+				}
+				return
+			}
+			if cmd == nil {
+				t.Fatalf("expected %q to be sent, nothing was", tc.wantSent)
+			}
+			if got := m2.messages[len(m2.messages)-1]; got != "[You] "+tc.wantSent {
+				t.Fatalf("sent %q, want %q", got, "[You] "+tc.wantSent)
+			}
+		})
+	}
+}

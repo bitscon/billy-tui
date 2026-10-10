@@ -317,3 +317,134 @@ func TestFloorTierPickOverlayRender(t *testing.T) {
 		}
 	}
 }
+
+// ── the pending-question picker overlay (contract v3 §14/§15) ────────────────
+
+// The overlay shows the question and every option VERBATIM, numbered in the
+// order they arrived, with the selection marked and the key line present.
+func TestQuestionPickerOverlayRendersVerbatim(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	m.pendingQuestion = &PendingQuestion{
+		QuestionID:    "consentq-1",
+		Question:      "Reading your saved reading means sending it to the cloud brain. What should I do?",
+		Options:       []string{"Allow once", "Allow for this conversation", "Always allow", "Don't allow"},
+		AllowFreeText: false,
+		Kind:          "cloud_read_consent",
+		Source:        "annex",
+	}
+	m.questionPickerMode = true
+	m.questionPickerIdx = 2
+
+	out := m.View()
+	for _, want := range []string{
+		questionPickerTitle,
+		"1. Allow once",
+		"2. Allow for this conversation",
+		"3. Always allow",
+		"4. Don't allow",
+		"1–4 choose",
+		"esc close (nothing sent)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("question overlay missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "▸ 3. Always allow") {
+		t.Fatalf("overlay does not mark the selection:\n%s", out)
+	}
+}
+
+// A permission request shows what it is about from the runtime's own structured
+// fields, and says plainly that this one is answered by the words.
+func TestQuestionPickerOverlayPermissionSubjectAndNote(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	m.pendingQuestion = &PendingQuestion{
+		QuestionID: "q-1",
+		Question:   "May I write that file?",
+		Options:    []string{"allow once", "allow for this session", "deny"},
+		Kind:       questionKindPermission,
+		Tool:       "write_file",
+		Target:     "notes/today.md",
+	}
+	m.questionPickerMode = true
+
+	out := m.View()
+	for _, want := range []string{"write_file", "notes/today.md", "answered by the words, not a number"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("permission overlay missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A question that accepts free text says so; an ordinary one adds no note at
+// all, and no kind leaks onto the screen.
+func TestQuestionPickerNoteAndSubjectHelpers(t *testing.T) {
+	free := &PendingQuestion{Options: []string{"a", "b"}, Kind: questionKindDefault, AllowFreeText: true}
+	if note := questionPickerNote(free); !strings.Contains(note, "Your own words") {
+		t.Fatalf("free-text note = %q", note)
+	}
+	plain := &PendingQuestion{Options: []string{"a", "b"}, Kind: questionKindDefault}
+	if note := questionPickerNote(plain); note != "" {
+		t.Fatalf("an ordinary question must carry no note, got %q", note)
+	}
+	fenced := &PendingQuestion{Options: []string{"a", "b"}, Kind: questionKindLift}
+	if note := questionPickerNote(fenced); !strings.Contains(note, "not a number") {
+		t.Fatalf("fenced note = %q", note)
+	}
+
+	if got := questionSubjectLine(&PendingQuestion{}); got != "" {
+		t.Fatalf("no tool/target must render no subject line, got %q", got)
+	}
+	if got := questionSubjectLine(&PendingQuestion{Tool: "read_file"}); got != "read_file" {
+		t.Fatalf("tool-only subject = %q", got)
+	}
+	if got := questionSubjectLine(&PendingQuestion{Target: "notes"}); got != "notes" {
+		t.Fatalf("target-only subject = %q", got)
+	}
+}
+
+// The wrap width stays inside a wide terminal and never collapses on a narrow
+// one.
+func TestQuestionWrapWidth(t *testing.T) {
+	cases := map[int]int{200: 72, 100: 72, 60: 52, 20: 24, 0: 24}
+	for term, want := range cases {
+		if got := questionWrapWidth(term); got != want {
+			t.Fatalf("questionWrapWidth(%d) = %d, want %d", term, got, want)
+		}
+	}
+}
+
+// With nothing pending the view is exactly today's — no overlay, no artifacts.
+func TestNoQuestionLeavesTheViewUntouched(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = nm.(model)
+	out := m.View()
+	if strings.Contains(out, questionPickerTitle) {
+		t.Fatalf("question overlay rendered with nothing pending:\n%s", out)
+	}
+}
+
+// The help overlay documents the picker keys and the :permissions command.
+func TestHelpContentQuestionLines(t *testing.T) {
+	for _, want := range []string{"Choose when Billy offers you options", ":permissions", "What the cloud brain may read"} {
+		if !strings.Contains(helpContent, want) {
+			t.Fatalf("help overlay missing %q", want)
+		}
+	}
+}
+
+// The command bar lists :permissions alongside the other colon commands.
+func TestCommandBarListsPermissions(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 32})
+	m = nm.(model)
+	m.commandMode = true
+	if out := m.View(); !strings.Contains(out, ":permissions") {
+		t.Fatalf("command bar missing :permissions:\n%s", out)
+	}
+}

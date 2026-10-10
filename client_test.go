@@ -706,3 +706,215 @@ func TestSetBrainFloorErrors(t *testing.T) {
 		t.Fatalf("404 must map to errFloorSurfaceAbsent, got %v", err)
 	}
 }
+
+// ── the pending question on the wire (contract v3 §14) ───────────────────────
+
+// consentQuestionJSON is a cloud-read consent question exactly as the runtime
+// builds it: four fixed options, no free text, the structured source name.
+// ONE LINE on purpose: an SSE frame is a single "data: {…}" line, so the stream
+// tests below splice this straight into a frame.
+const consentQuestionJSON = `{"question_id":"consentq-7f3c91a20b4e","question":"Reading your Kanboard board means sending it to the cloud brain. What should I do?","options":["Allow once","Allow for this conversation","Always allow","Don't allow"],"allow_free_text":false,"kind":"cloud_read_consent","source":"board"}`
+
+// A reply carrying a pending question decodes every field; a reply carrying an
+// explicit null, and a legacy reply with no key at all, both decode to "nothing
+// pending" with the text untouched (contract v3 §13 rule 6 / §17).
+func TestDoAskPendingQuestionPresentNullAbsent(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"present", `{"message":"pick one","pending_question":` + consentQuestionJSON + `}`, true},
+		{"explicit null", `{"message":"pick one","pending_question":null}`, false},
+		{"legacy, no key", `{"message":"pick one"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			res, err := newBillyClient(srv.URL).doAsk("hi")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Message != "pick one" {
+				t.Fatalf("message = %q, want %q", res.Message, "pick one")
+			}
+			if tc.want != (res.Question != nil) {
+				t.Fatalf("question present = %v, want %v", res.Question != nil, tc.want)
+			}
+			if !tc.want {
+				return
+			}
+			q := res.Question
+			if q.QuestionID != "consentq-7f3c91a20b4e" || q.Kind != "cloud_read_consent" || q.Source != "board" {
+				t.Fatalf("question decoded wrong: %+v", q)
+			}
+			if q.AllowFreeText {
+				t.Fatalf("allow_free_text must decode false")
+			}
+			if len(q.Options) != 4 || q.Options[0] != "Allow once" || q.Options[3] != "Don't allow" {
+				t.Fatalf("options decoded wrong (order is load-bearing): %q", q.Options)
+			}
+		})
+	}
+}
+
+// A permission question's tool and target decode too, so the picker can show
+// what is being asked about without parsing the sentence.
+func TestDoAskPermissionQuestionToolAndTarget(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"message":"may I?","pending_question":{
+			"question_id":"q-1","question":"May I write that file?",
+			"options":["allow once","allow for this session","deny"],
+			"kind":"permission","tool":"write_file","target":"notes/today.md"}}`)
+	}))
+	defer srv.Close()
+
+	res, err := newBillyClient(srv.URL).doAsk("hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Question == nil || res.Question.Tool != "write_file" || res.Question.Target != "notes/today.md" {
+		t.Fatalf("tool/target not decoded: %+v", res.Question)
+	}
+}
+
+// Every shape the contract does not admit is "nothing pending" — and never an
+// error, because a malformed question must not cost the operator the reply it
+// arrived with (contract v3 §13 rule 6).
+func TestDoAskMalformedPendingQuestionKeepsTheReply(t *testing.T) {
+	bodies := map[string]string{
+		"not an object":    `{"message":"hi","pending_question":"allow once"}`,
+		"a list":           `{"message":"hi","pending_question":["a","b"]}`,
+		"no question_id":   `{"message":"hi","pending_question":{"question":"q?","options":["a","b"]}}`,
+		"blank id":         `{"message":"hi","pending_question":{"question_id":"  ","question":"q?","options":["a","b"]}}`,
+		"no question text": `{"message":"hi","pending_question":{"question_id":"q-1","options":["a","b"]}}`,
+		"one option":       `{"message":"hi","pending_question":{"question_id":"q-1","question":"q?","options":["a"]}}`,
+		"no options":       `{"message":"hi","pending_question":{"question_id":"q-1","question":"q?"}}`,
+		"blank option":     `{"message":"hi","pending_question":{"question_id":"q-1","question":"q?","options":["a","  "]}}`,
+		"options a string": `{"message":"hi","pending_question":{"question_id":"q-1","question":"q?","options":"ab"}}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+
+			res, err := newBillyClient(srv.URL).doAsk("hi")
+			if err != nil {
+				t.Fatalf("a malformed question must not fail the reply: %v", err)
+			}
+			if res.Message != "hi" {
+				t.Fatalf("message lost: %q", res.Message)
+			}
+			if res.Question != nil {
+				t.Fatalf("malformed question must read as nothing pending: %+v", res.Question)
+			}
+		})
+	}
+}
+
+// A question with no kind reads as the ordinary kind, never as empty.
+func TestDecodePendingQuestionKindDefaults(t *testing.T) {
+	q := decodePendingQuestion([]byte(`{"question_id":"q-1","question":"q?","options":["a","b"]}`))
+	if q == nil {
+		t.Fatalf("valid question decoded as nothing pending")
+	}
+	if q.Kind != questionKindDefault {
+		t.Fatalf("kind = %q, want %q", q.Kind, questionKindDefault)
+	}
+}
+
+// On the stream the question rides a frame of its OWN — after the message
+// frames, before the terminal one, empty chunk, done:false (contract v3 §14).
+// It must reach the Done event, and its frame must add nothing to the text.
+func TestOpenAskStreamPendingQuestionOnItsOwnFrame(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"pick \",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"one\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":false,\"pending_question\":"+consentQuestionJSON+"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true,\"usage\":{}}\n\n")
+	}))
+	defer srv.Close()
+
+	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var done streamEvent
+	for ev := range events {
+		if ev.Err != nil {
+			t.Fatalf("unexpected stream error: %v", ev.Err)
+		}
+		if ev.Done {
+			done = ev
+		}
+	}
+	if done.FullText != "pick one" {
+		t.Fatalf("full text = %q, want %q (the question frame must add nothing)", done.FullText, "pick one")
+	}
+	if done.Question == nil || done.Question.QuestionID != "consentq-7f3c91a20b4e" {
+		t.Fatalf("question did not reach the done event: %+v", done.Question)
+	}
+}
+
+// A malformed question on the stream leaves the turn whole: the text is
+// delivered, the done event arrives, and nothing is pending.
+func TestOpenAskStreamMalformedQuestionDoesNotKillTheTurn(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"hello\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":false,\"pending_question\":\"allow once\"}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true}\n\n")
+	}))
+	defer srv.Close()
+
+	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	sawDone := false
+	for ev := range events {
+		if ev.Err != nil {
+			t.Fatalf("a malformed question must not error the stream: %v", ev.Err)
+		}
+		if ev.Done {
+			sawDone = true
+			if ev.FullText != "hello" {
+				t.Fatalf("full text = %q, want %q", ev.FullText, "hello")
+			}
+			if ev.Question != nil {
+				t.Fatalf("malformed question must read as nothing pending: %+v", ev.Question)
+			}
+		}
+	}
+	if !sawDone {
+		t.Fatalf("stream never completed")
+	}
+}
+
+// A legacy stream — no pending_question anywhere — yields a nil question, i.e.
+// exactly today's behavior (contract v3 §17 first row).
+func TestOpenAskStreamLegacyNilQuestion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"hi\",\"done\":false}\n\n")
+		_, _ = io.WriteString(w, "data: {\"chunk\":\"\",\"done\":true}\n\n")
+	}))
+	defer srv.Close()
+
+	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for ev := range events {
+		if ev.Done && ev.Question != nil {
+			t.Fatalf("legacy stream must decode nil question, got %+v", ev.Question)
+		}
+	}
+}
