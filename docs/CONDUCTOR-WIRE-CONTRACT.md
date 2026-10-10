@@ -1,11 +1,12 @@
-# Conductor Wire Contract — billy-tui ↔ billy-runtime (v1 + v2)
+# Conductor Wire Contract — billy-tui ↔ billy-runtime (v1 + v2 + v3)
 
 Status: **v1 (§1–§7) pinned 2026-09-01 · v2 amendment (§8–§12) pinned 2026-09-02 —
-both proposed to the runtime architect** (runtime side = Modernization card 1 for
+both proposed to the runtime architect · v3 amendment (§13–§17) pinned 2026-10-10,
+documenting a runtime surface that is ALREADY SEALED on the runtime side** (runtime side = Modernization card 1 for
 v1; the v2 surfaces are the floor-table and mode-set halves of Modernization 5/6,
 governed single-lane in billy-runtime).
-Date: 2026-09-01 (v1) · 2026-09-02 (v2) · Home: the client repo, so all client
-lanes build against ONE shape.
+Date: 2026-09-01 (v1) · 2026-09-02 (v2) · 2026-10-10 (v3) · Home: the client repo,
+so all client lanes build against ONE shape.
 
 Billy's conductor now picks a brain per turn (auto-routing is live), but nothing it
 decides is on the API. This contract adds the three missing surfaces. The client
@@ -316,3 +317,168 @@ type SetBrainFloorRequest struct {
 | legacy (today) | no `routing_mode` | 404 | `:routing` reports the runtime doesn't support it and sends nothing; floor screen "unavailable"; everything else exactly today |
 | new | `routing_mode` present | 200 | `:routing` toggles live (display still follows the poll); floor screen lists/edits live |
 | new runtime, old client | ignored | never called | today's behavior (unknown fields dropped) |
+
+---
+
+# Amendment v3 — the pending question and its picker (pinned 2026-10-10)
+
+## 13. v3 scope and rules
+
+One surface: **the structured question a reply can carry**, so the client can offer
+the operator a choice instead of making them type a number into prose. The runtime
+half is already live-sealed (billy-runtime I262-C3, ADR-0258); this section pins the
+shape the client decodes and the rules the client answers under.
+
+Every §1 rule binds v3 unchanged — additive only, absence = legacy, names are the
+runtime's own. Two rules are added:
+
+6. **A malformed question is "nothing pending", never an error.** The field is
+   additive and operator-facing on both sides: the runtime drops a question it cannot
+   guard rather than failing the reply, and the client does the same in reverse — any
+   shape it does not admit (a non-object, a null, a missing id, fewer than two
+   options, a blank option) leaves the reply intact and simply arms no picker. A
+   question must never cost the operator the answer it came attached to.
+7. **The answer channel is unchanged chat text, on the same session.** There is no
+   answer endpoint. The operator's next message on the SAME session is matched
+   against the open question by the runtime (§14). The client sends that message
+   through the one send path a typed message uses, and never sends an answer on a
+   session other than the one the question arrived on.
+
+## 14. Surface 6 — the pending question · `POST /ask` and `GET /ask/stream`
+
+`POST /ask` carries `pending_question`: **always present, null when nothing is
+pending** (the runtime builds it with no `exclude_none`).
+
+```json
+{
+  "message": "Reading your Kanboard board means sending it to the cloud brain. …\n\n1. Allow once\n2. Allow for this conversation\n3. Always allow\n4. Don't allow\n\nReply with the number or the option itself.",
+  "session_id": "tui-…",
+  "pending_question": {
+    "question_id": "consentq-7f3c91a20b4e",
+    "question": "Reading your Kanboard board means sending it to the cloud brain. What should I do?",
+    "options": ["Allow once", "Allow for this conversation", "Always allow", "Don't allow"],
+    "allow_free_text": false,
+    "kind": "cloud_read_consent",
+    "source": "board"
+  }
+}
+```
+
+### What each field means to the client
+
+| Field | Meaning to the client |
+|---|---|
+| `question_id` | The question's identity. Required and non-blank; a question without one is dropped by the runtime and must be treated as nothing pending. The client does not send it — the answer is matched by session and recency, not by id. |
+| `question` | The question **in the brain's own words**, already through the runtime's egress guards. Shown **verbatim**; never paraphrased, truncated or re-worded. |
+| `options` | The choice labels, **in order**. Their 1-based position in THIS list is the number the operator's answer may carry. The runtime admits two to four; the client accepts two or more and never reorders, filters or renumbers them. |
+| `allow_free_text` | `true` = the operator's own words are accepted **on the turn immediately after** the question, and only that turn. `false` = only a number or an exact option label counts. Either way the picker is offered and the input box stays live. |
+| `kind` | Which question this is, and therefore **what answers it** (§15). Absent reads as `"question"`. |
+| `tool`, `target` | `permission` kind only: the tool being asked about and its scrubbed target. Present so a client can SHOW what is being asked about without parsing the sentence. Absent on every other kind. |
+| `source` | `cloud_read_consent` and `cloud_read_permissions` only: which of the operator's sources the question is about — one of `board`, `annex`, `files`, `memory`. Never anything read FROM the source. Absent on every other kind. |
+
+### The kinds, and what answers each
+
+| `kind` | Armed by | A number answers it | Notes |
+|---|---|---|---|
+| `question` | the brain's own `ask_operator` tool | **yes** | the ordinary choice |
+| `lift_read_only` | the brain's `ask_operator` tool | answers, but **never lifts** | the hold comes off only on the option typed out in full |
+| `permission` | the loop's own chokepoint — never the brain | **no** | a number matches nothing; only the exact option label counts |
+| `cloud_read_consent` | the cloud-read chokepoint — never the brain | **yes** | one held cloud-bound read, per source (ADR-0258) |
+| `cloud_read_permissions` | the `/permissions` handler — never the brain | **yes** | the two-step settings flow: pick a source, then pick its setting |
+
+`permission` and `lift_read_only` are the two kinds the runtime deliberately fences
+to a **typed** answer, for the same reason in both cases: a bare number left over
+from an older question on the operator's screen must never grant a privilege they
+did not read. The rendered message says so in words. The client honours the fence by
+sending the **option label verbatim** for those two kinds and the **number** for
+every other kind (§15) — never a number the runtime would discard.
+
+### Where it rides on the stream
+
+`GET /ask/stream` does **not** put the question on the terminal frame. It rides its
+own frame, **after** the message frames and **before** the terminal one, with an
+empty chunk and `done: false`:
+
+```
+data: {"chunk": "…reply text…", "done": false}
+data: {"chunk": "", "done": false, "pending_question": { … }}
+data: {"chunk": "", "done": true, "usage": { … }}
+```
+
+The client therefore accepts `pending_question` on **any** frame and carries the
+first non-null one through to the turn's completion — the same rule §3 sets for
+`brain` and `approval`. A frame carrying only a question adds nothing to the reply
+text (its chunk is empty), so content parity holds.
+
+### Lifetime
+
+- **One at a time.** The runtime holds exactly one pending question per session.
+  Arming a new one silently replaces any held one, so the client's picker is
+  replaced by every newer reply and a reply carrying no question clears it.
+- **In memory only.** The question dies with the runtime process; a restart leaves
+  nothing to answer. The client must never persist one or re-offer one across a
+  session change.
+- **It expires by turn count.** An answer typed after the question lapsed changes
+  nothing and is reported as lapsed. The client does not track expiry — it sends the
+  answer and renders what comes back.
+
+## 15. Rules the client answers under
+
+1. **What is sent.** Choosing option *i* (1-based) sends:
+   - the **decimal number** `i` — for every kind except the two fenced ones;
+   - the **option label, verbatim** — for `permission` and `lift_read_only`.
+
+   A fenced kind whose label is itself all digits is **ambiguous on the wire** (the
+   runtime would read it as a position): the client sends nothing and puts the label
+   in the input box for the operator to send.
+2. **Same session, always.** The session the question arrived on is recorded with it.
+   If the session has since changed (`:session new`), the picker sends nothing and
+   says why — the runtime would match the answer against nothing.
+3. **Esc sends nothing.** Closing the picker is not an answer. The question stays
+   answerable, because the reply text still carries the numbered list and the input
+   box still accepts a typed number or label.
+4. **One picker.** A newer reply replaces the open picker outright; a reply with no
+   question closes it. Any submission — typed, queued or picked — closes it, so one
+   choice can never be sent twice.
+5. **Verbatim.** The question and every option label are rendered exactly as received.
+   The client adds no label of its own to a choice and never re-words one.
+6. **`:permissions`** sends the literal message `/permissions` on the current
+   session, and nothing else: the runtime's own recognizer requires it as the whole
+   message. The two-step flow that follows (pick a source, then pick its setting) is
+   driven entirely by the `pending_question` of each reply — the client holds no
+   knowledge of sources or settings.
+
+## 16. Pinned Go structs (v3 — the client decodes exactly this)
+
+```go
+// PendingQuestion mirrors the runtime's PendingQuestion model (v3 §14).
+// Nil = nothing pending: absent, null, or a shape this contract does not admit.
+type PendingQuestion struct {
+    QuestionID    string   `json:"question_id"`
+    Question      string   `json:"question"`
+    Options       []string `json:"options"`
+    AllowFreeText bool     `json:"allow_free_text"`
+    Kind          string   `json:"kind"`   // "" reads as "question"
+    Tool          string   `json:"tool"`   // permission kind only
+    Target        string   `json:"target"` // permission kind only
+    Source        string   `json:"source"` // consent kinds only
+}
+
+// The /ask decode and the stream-frame decode each gain the field as RAW json,
+// decoded by a tolerant helper — a malformed question must not fail the reply
+// (v3 §13 rule 6):
+//     PendingQuestion json.RawMessage `json:"pending_question"`
+```
+
+## 17. Degradation matrix (v3)
+
+| Runtime / reply | `pending_question` | Client behavior |
+|---|---|---|
+| legacy (predates the field) | absent | exactly today's behavior; no picker, nothing sent |
+| new, ordinary turn | `null` | nothing pending; any open picker closes |
+| new, question armed, kind takes a number | object, 2–4 options | picker opens; a choice sends the option's number on the same session |
+| new, question armed, `permission` / `lift_read_only` | object | picker opens; a choice sends the option label typed out verbatim — never a number |
+| new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
+| malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
+| question armed, session changed since | object | picker sends nothing and says the session changed |
+| new runtime, old client | ignored | today's behavior (unknown fields dropped) |
