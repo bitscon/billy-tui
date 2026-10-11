@@ -25,6 +25,7 @@ Conductor modernization (2026-09): the client is truthful about — and now in c
 - [Modular Identity P10] Unix-socket transport — `--addr unix:///path/to/socket` dials billy-runtime over AF_UNIX for /health, /ask, /ask/stream, and the sidebar GETs; identity is transport-derived over the socket (operator recognised, no text challenge). TCP (`http://…`) preserved as the default/fallback. Proven end-to-end over a real socket (hermetic test) and against the live billy-runtime socket (opt-in `BILLY_LIVE_SOCKET` test)
 - [Modernization wave 1] Conductor wire contract v1 pinned + honest routing display, per-reply brain records, approval affordance with y/n quick keys and the enter-while-busy queue, debug captures with routing detail, long-reply stream fix (Modernization 0/2/3/4/7/8; merged `aae7387`)
 - [Modernization wave 2] Contract v2 pinned (floor table + mode set) + `:routing` toggle/picker and the `:brains` role→floor screen, both with legacy read-only degradation and full test coverage (Modernization 5/6 client halves; commits `5e60f51`, `187329e`, `031cb87`)
+- [Consent picker] Contract v3 pinned (pending_question) + a picker for every pending question Billy asks and the :permissions screen, the client half of ADR-0258 (2026-10-10)
 
 ## Next Steps
 The code-review remediation build (Phases 1–4) is closed. Two forward-looking feature ideas are now tracked on the billy-tui Kanboard board (Backlog, `status:blocked`); both carry an acceptance checklist there.
