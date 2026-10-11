@@ -1179,29 +1179,164 @@ func TestAnswerForOption(t *testing.T) {
 	lift := &PendingQuestion{Options: []string{"approve", "no"}, Kind: questionKindLift}
 	digits := &PendingQuestion{Options: []string{"8080", "9090"}, Kind: questionKindPermission}
 
+	escape := &PendingQuestion{Options: []string{"approve\x1b[2J", "no"}, Kind: questionKindLift}
+
 	cases := []struct {
-		name     string
-		q        *PendingQuestion
-		idx      int
-		want     string
-		sendable bool
+		name      string
+		q         *PendingQuestion
+		idx       int
+		want      string
+		sendable  bool
+		stageable bool
 	}{
-		{"ordinary first", ordinary, 0, "1", true},
-		{"ordinary second", ordinary, 1, "2", true},
-		{"permission label", perm, 1, "deny", true},
-		{"lift label", lift, 0, "approve", true},
-		{"fenced all-digit label", digits, 0, "8080", false},
-		{"nil question", nil, 0, "", false},
-		{"index below range", ordinary, -1, "", false},
-		{"index past range", ordinary, 2, "", false},
+		{"ordinary first", ordinary, 0, "1", true, true},
+		{"ordinary second", ordinary, 1, "2", true, true},
+		{"permission label", perm, 1, "deny", true, true},
+		{"lift label", lift, 0, "approve", true, true},
+		{"fenced all-digit label", digits, 0, "8080", false, true},
+		{"fenced label with an escape sequence", escape, 0, "approve\x1b[2J", false, false},
+		{"nil question", nil, 0, "", false, false},
+		{"index below range", ordinary, -1, "", false, false},
+		{"index past range", ordinary, 2, "", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, sendable := answerForOption(tc.q, tc.idx)
-			if got != tc.want || sendable != tc.sendable {
-				t.Fatalf("answerForOption = (%q, %v), want (%q, %v)", got, sendable, tc.want, tc.sendable)
+			got, sendable, stageable := answerForOption(tc.q, tc.idx)
+			if got != tc.want || sendable != tc.sendable || stageable != tc.stageable {
+				t.Fatalf("answerForOption = (%q, %v, %v), want (%q, %v, %v)",
+					got, sendable, stageable, tc.want, tc.sendable, tc.stageable)
 			}
 		})
+	}
+}
+
+// A fenced label carrying control characters is REFUSED, not echoed. Its bytes
+// would otherwise reach the transcript, the resize redraw and the input history,
+// none of which sanitise for display — so choosing it would clear the operator's
+// own screen on their own keypress.
+func TestFencedLabelWithControlCharactersIsRefusedNotEchoed(t *testing.T) {
+	m := questionModel(t, &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{"approve\x1b[2J\x1b[H", "keep it read-only"},
+		Kind:    questionKindLift,
+	})
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("an unsafe label must not be sent")
+	}
+	if nm.input.Value() != "" {
+		t.Fatalf("an unsafe label must not be staged in the input box: %q", nm.input.Value())
+	}
+	for _, line := range nm.messages {
+		if strings.Contains(line, "\x1b") {
+			t.Fatalf("an escape sequence reached the transcript: %q", line)
+		}
+	}
+	if nm.saveStatus != questionUnsafeLabelNotice {
+		t.Fatalf("status = %q, want the unsafe-label notice", nm.saveStatus)
+	}
+}
+
+// questionContext keeps everything the reply said AROUND the question and drops
+// only the question line and the runtime's own numbered option lines.
+func TestQuestionContextKeepsTheProseAndDropsTheList(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1",
+		Question:   "Which one would you like to change?",
+		Options:    []string{"your Kanboard board", "your files"},
+		Kind:       "cloud_read_permissions",
+	}
+	message := strings.Join([]string{
+		"What the cloud brain may read, and what it may not:",
+		"- your Kanboard board: asks each time",
+		"- your files: always allowed",
+		"",
+		"Which one would you like to change?",
+		"",
+		"1. your Kanboard board",
+		"2. your files",
+		"",
+		"Reply with the number or the option itself.",
+	}, "\n")
+
+	got := questionContext(message, q)
+	for _, want := range []string{
+		"What the cloud brain may read",
+		"- your Kanboard board: asks each time",
+		"- your files: always allowed",
+		"Reply with the number or the option itself.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("context dropped %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Which one would you like to change?") {
+		t.Fatalf("the question must not be repeated in the context:\n%s", got)
+	}
+	for _, unwanted := range []string{"1. your Kanboard board", "2. your files"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("the numbered list must not survive in the context:\n%s", got)
+		}
+	}
+	if strings.Contains(got, "\n\n\n") {
+		t.Fatalf("blank runs must be collapsed:\n%q", got)
+	}
+
+	// A numbered line whose label is NOT the option at that position is prose
+	// and is kept.
+	kept := questionContext("1. something else entirely\nQuestion?", q)
+	if !strings.Contains(kept, "1. something else entirely") {
+		t.Fatalf("a non-matching numbered line must be kept: %q", kept)
+	}
+	if questionContext("anything", nil) != "" {
+		t.Fatalf("no question means no context")
+	}
+}
+
+// The reply's surrounding prose travels with the question, so the overlay cannot
+// hide what the runtime deliberately kept out of the question text.
+func TestAdoptedQuestionCarriesTheReplyProse(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = sized.(model)
+
+	q := &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{"approve", "keep it read-only"},
+		Kind:    questionKindLift,
+	}
+	message := "This conversation is read-only. Answering 'approve' is what lets me make changes.\n\nLift the hold?\n\n1. approve\n2. keep it read-only"
+	next, _ := m.Update(responseMsg{text: message, Question: q, Gen: 0})
+	nm := next.(model)
+	if !strings.Contains(nm.questionContext, "read-only") {
+		t.Fatalf("the lift warning did not travel with the question: %q", nm.questionContext)
+	}
+	if !strings.Contains(nm.View(), "This conversation is read-only") {
+		t.Fatalf("the overlay hides the lift warning:\n%s", nm.View())
+	}
+
+	// A reply with no question clears it.
+	next2, _ := nm.Update(responseMsg{text: "done", Gen: 0})
+	if next2.(model).questionContext != "" {
+		t.Fatalf("the context must die with the question")
+	}
+}
+
+// A notice the picker sets is drawn INSIDE the overlay: the overlay covers the
+// status bar, so a notice left there would be set and never seen.
+func TestPickerNoticeIsVisibleInsideTheOverlay(t *testing.T) {
+	m := questionModel(t, testConsentQuestion())
+	m.isStreaming = true // forces the busy refusal
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if nm.saveStatus != questionBusyNotice {
+		t.Fatalf("status = %q, want the busy notice", nm.saveStatus)
+	}
+	if !strings.Contains(nm.View(), "still working") {
+		t.Fatalf("the notice is not visible on the picker screen:\n%s", nm.View())
 	}
 }
 
@@ -1377,7 +1512,9 @@ func TestFencedLabelNoticeMatchesWhatActuallyHappened(t *testing.T) {
 // — the display sanitiser must never reach the wire, or the runtime's own
 // label match would fail.
 func TestFencedLabelIsSentByteExact(t *testing.T) {
-	label := "allow\tonce"
+	// A non-breaking space: ordinary text the sanitiser leaves alone, so the
+	// label is sendable and the wire bytes can be compared exactly.
+	label := "allow\u00a0once"
 	m := questionModel(t, &PendingQuestion{
 		QuestionID: "q-1", Question: "May I?", Options: []string{label, "deny"},
 		Kind: questionKindPermission,
@@ -1404,11 +1541,11 @@ func TestQuestionNumberKeyIgnoresAnOffScreenOption(t *testing.T) {
 	})
 	m.questionPickerIdx = 25
 
-	fits, _, optionRows := m.questionOverlayPlan()
-	if !fits {
+	plan := m.questionOverlayPlan()
+	if !plan.fits {
 		t.Fatalf("the overlay should be drawable at 100x32")
 	}
-	start, _ := questionOptionWindow(25, 40, optionRows)
+	start, _ := questionOptionWindow(25, 40, plan.optionRows)
 	if start == 0 {
 		t.Fatalf("the list should be windowed away from option 1 for this test")
 	}
@@ -1449,7 +1586,7 @@ func TestQuestionPickerOwnsNoKeysWhenTheOverlayWouldNotFit(t *testing.T) {
 	if !m.paneLayoutFits() {
 		t.Fatalf("100x12 clears the two-pane floor")
 	}
-	if fits, _, _ := m.questionOverlayPlan(); fits {
+	if m.questionOverlayPlan().fits {
 		t.Fatalf("a permission question needs more than 12 rows")
 	}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

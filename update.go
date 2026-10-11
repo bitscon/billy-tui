@@ -188,7 +188,7 @@ func approvalPromptBlock(a *ApprovalRequest) string {
 // answer a newer question. It adds nothing to the transcript: the reply text the
 // runtime already rendered carries the question and its numbered list, and the
 // picker is an overlay on top of that, never a second copy of it.
-func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRequest, question *PendingQuestion) {
+func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRequest, question *PendingQuestion, message string) {
 	if brain != nil {
 		m.lastBrain = brain
 		line := brainRecordLine(brain)
@@ -201,7 +201,7 @@ func (m *model) recordConductorSurfaces(brain *BrainReport, approval *ApprovalRe
 		m.messages = append(m.messages, block)
 		m.displayMessages = append(m.displayMessages, ErrorStyle.Render(block))
 	}
-	m.adoptPendingQuestion(question)
+	m.adoptPendingQuestion(question, message)
 }
 
 // submitPrompt sends text to Billy exactly as an enter-key submission does —
@@ -461,21 +461,38 @@ func allDigits(s string) bool {
 
 // answerForOption is the ONE place a chosen option becomes the text that goes on
 // the wire (contract v3 §15 rule 1). sendable is false when the choice cannot be
-// expressed unambiguously — a fenced kind whose label is itself all digits,
-// which the runtime would read as a position — and the label is then returned
-// for the operator to send themselves rather than guessed at.
-func answerForOption(q *PendingQuestion, idx int) (text string, sendable bool) {
+// sent honestly or safely; stageable says whether the label is then worth putting
+// in the input box for the operator to send themselves.
+//
+// A fenced kind's answer is the label, byte-exact, because that is what the
+// runtime matches — which means those bytes also reach the operator's transcript,
+// their resize redraw and their input history, none of which go through the
+// display sanitiser. So a fenced label carrying anything the sanitiser would
+// make inert is REFUSED outright rather than echoed: a `lift_read_only` label is
+// written by the brain, and neither the ask_operator validator nor the runtime's
+// egress guards strip control characters, so "approve\x1b[2J" survives to the
+// wire field intact. Sending it would clear the operator's screen on their own
+// keypress.
+func answerForOption(q *PendingQuestion, idx int) (text string, sendable, stageable bool) {
 	if q == nil || idx < 0 || idx >= len(q.Options) {
-		return "", false
+		return "", false, false
 	}
 	if questionTypedAnswerOnly(q.Kind) {
 		label := strings.TrimSpace(q.Options[idx])
-		if label == "" || allDigits(label) {
-			return label, false
+		switch {
+		case label == "":
+			return "", false, false
+		case sanitizeQuestionDisplay(label) != label:
+			// Not typeable and not safe to echo. Nothing is staged.
+			return label, false, false
+		case allDigits(label):
+			// Ambiguous on the wire — the runtime would read it as a position —
+			// but harmless to put in front of the operator.
+			return label, false, true
 		}
-		return label, true
+		return label, true, true
 	}
-	return strconv.Itoa(idx + 1), true
+	return strconv.Itoa(idx + 1), true, true
 }
 
 // questionNumberKeys is how many options the 1..9 direct-choice keys cover. The
@@ -502,6 +519,7 @@ const (
 	questionSessionMovedNotice   = "That question belonged to the previous session — nothing sent"
 	questionTypeItNotice         = "This one must be typed out — the option is in the input box, press enter to send"
 	questionTypeItYourselfNotice = "This one must be typed out — type the option exactly as shown"
+	questionUnsafeLabelNotice    = "I can't send that option — it carries characters your terminal would act on. Answer in your own words, or ask me again."
 	questionBusyNotice           = "Billy is still working — the choice was not sent"
 )
 
@@ -522,14 +540,21 @@ func (m *model) currentSessionID() string {
 // the §15 rule 2 guard then compared new to new and passed, and the answer went
 // out on a session the runtime had nothing to match it against. The operator was
 // told nothing and believed they had answered.
-func (m *model) adoptPendingQuestion(q *PendingQuestion) {
+func (m *model) adoptPendingQuestion(q *PendingQuestion, message string) {
 	m.questionPickerIdx = 0
 	m.pendingQuestion = q
 	if q == nil {
 		m.questionPickerMode = false
 		m.questionSession = ""
+		m.questionContext = ""
 		return
 	}
+	// Everything the reply said AROUND the question travels with it. The runtime
+	// deliberately puts load-bearing sentences there rather than in the question
+	// — the read-only lift warning, and the whole settings listing that is the
+	// "view" half of /permissions — and an overlay that covered them would hide
+	// exactly what the operator is supposed to read before choosing.
+	m.questionContext = questionContext(message, q)
 	m.questionSession = m.turnSession
 	m.questionPickerMode = true
 }
@@ -542,6 +567,58 @@ func (m *model) clearPendingQuestion() {
 	m.questionPickerMode = false
 	m.questionPickerIdx = 0
 	m.questionSession = ""
+	m.questionContext = ""
+}
+
+// questionContext is what the reply said AROUND the question: the whole message
+// with the question line and the numbered option lines removed, blank runs
+// collapsed.
+//
+// A deterministic filter on strings the client already holds VERBATIM — never a
+// reading of the prose. A line is dropped only when it equals the question, or
+// when it is "<n>. <label>" for the option actually at position n. Anything the
+// filter does not recognise is kept, so a message the egress guards respaced
+// loses nothing: at worst the question appears twice.
+func questionContext(message string, q *PendingQuestion) string {
+	if q == nil {
+		return ""
+	}
+	question := strings.TrimSpace(q.Question)
+	kept := make([]string, 0, 16)
+	for _, line := range strings.Split(message, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == question {
+			continue
+		}
+		if isNumberedOptionLine(trimmed, q.Options) {
+			continue
+		}
+		if trimmed == "" && (len(kept) == 0 || kept[len(kept)-1] == "") {
+			continue // collapse blank runs, and never open with one
+		}
+		kept = append(kept, trimmed)
+	}
+	for len(kept) > 0 && kept[len(kept)-1] == "" {
+		kept = kept[:len(kept)-1]
+	}
+	return strings.Join(kept, "\n")
+}
+
+// isNumberedOptionLine reports whether line is the runtime's own rendering of
+// one of these options at its own position — "3. Always allow" and nothing else.
+func isNumberedOptionLine(line string, options []string) bool {
+	dot := strings.Index(line, ". ")
+	if dot <= 0 {
+		return false
+	}
+	if !allDigits(line[:dot]) {
+		return false
+	}
+	position, err := strconv.Atoi(line[:dot])
+	if err != nil || position < 1 || position > len(options) {
+		return false
+	}
+	return strings.TrimSpace(line[dot+2:]) == strings.TrimSpace(options[position-1])
 }
 
 // chooseQuestionOption answers the open question with the option at idx, over
@@ -567,19 +644,22 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 		m.saveStatusTicks = 4
 		return nil
 	}
-	text, sendable := answerForOption(q, idx)
+	text, sendable, stageable := answerForOption(q, idx)
 	if !sendable {
 		m.questionPickerMode = false
-		// The label goes to the input box so the operator does not have to
-		// retype it — but only into an EMPTY box, because a draft they are
-		// writing is theirs. The notice then says which of the two happened:
-		// claiming the label is in the box when it was dropped is a sentence
-		// that is simply untrue (self-review finding).
-		if text != "" && m.input.Value() == "" {
+		switch {
+		case !stageable:
+			// The label is not safe to put anywhere the terminal will act on it.
+			m.saveStatus = questionUnsafeLabelNotice
+		case m.input.Value() == "":
+			// Put it in front of the operator so they do not have to retype it,
+			// but only into an EMPTY box — a draft they are writing is theirs.
 			m.input.SetValue(text)
 			m.refreshInputHeight()
 			m.saveStatus = questionTypeItNotice
-		} else {
+		default:
+			// The notice has to say what actually happened: claiming the label is
+			// in the box when it was dropped is simply untrue.
 			m.saveStatus = questionTypeItYourselfNotice
 		}
 		m.saveStatusTicks = 4
@@ -925,7 +1005,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		rendered := m.renderResponse(msg.text)
 		m.messages = append(m.messages, "[Billy] "+msg.text)
 		m.displayMessages = append(m.displayMessages, BillyResponseStyle.Render("[Billy] ")+rendered)
-		m.recordConductorSurfaces(msg.Brain, msg.Approval, msg.Question)
+		m.recordConductorSurfaces(msg.Brain, msg.Approval, msg.Question, msg.text)
 		m.thinking = false
 		m.liveMsg = ""
 		m.lastLatency = time.Since(m.requestStarted)
@@ -986,7 +1066,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// report the same count for the same reply.
 			m.sidebar.lastTokens = len(msg.FullText) / 4
 		}
-		m.recordConductorSurfaces(msg.Brain, msg.Approval, msg.Question)
+		m.recordConductorSurfaces(msg.Brain, msg.Approval, msg.Question, msg.FullText)
 		m.liveMsg = ""
 		m.streamBuffer = ""
 		m.isStreaming = false
@@ -1265,7 +1345,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// On a terminal too short to draw the overlay whole the client degrades to
 		// today's behaviour — the numbered list in the reply text, answered from
 		// the input box.
-		if fits, _, optionRows := m.questionOverlayPlan(); fits {
+		if plan := m.questionOverlayPlan(); plan.fits {
 			key := msg.String()
 			switch key {
 			case "up", "k":
@@ -1291,7 +1371,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// rather than answering with a label the operator never saw.
 				if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
 					idx := int(key[0] - '1')
-					start, end := questionOptionWindow(m.questionPickerIdx, len(m.pendingQuestion.Options), optionRows)
+					start, end := questionOptionWindow(m.questionPickerIdx, len(m.pendingQuestion.Options), plan.optionRows)
 					if idx < questionNumberKeys(m.pendingQuestion) && idx >= start && idx < end {
 						m.questionPickerIdx = idx
 						return m, m.chooseQuestionOption(idx)

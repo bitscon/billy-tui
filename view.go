@@ -318,22 +318,29 @@ func (m model) View() string {
 	// and its numbered list, and the input box answers it. questionPickerActive
 	// is the one predicate, shared with the key handler, so the screen and the
 	// keyboard can never disagree about whether a picker is on offer.
-	if fits, questionRows, optionRows := m.questionOverlayPlan(); fits {
+	if plan := m.questionOverlayPlan(); plan.fits {
 		q := m.pendingQuestion
 		width := questionWrapWidth(m.width)
 		wrap := lipgloss.NewStyle().Width(width)
-		start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), optionRows)
+		start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), plan.optionRows)
 
 		var b strings.Builder
 		b.WriteString(SectionHeaderStyle.Render(questionPickerTitle) + "\n")
 		b.WriteString(DimStyle.Render(truncateCells(
 			questionPickerHint(q, start == 0 && end == len(q.Options)), width)) + "\n\n")
+		// What the reply said AROUND the question comes first, because that is
+		// where the runtime puts the sentences the operator must read before
+		// choosing — the read-only lift warning, the settings listing.
+		if plan.contextRows >= 2 && m.questionContext != "" {
+			lines := strings.Split(wrap.Render(sanitizeQuestionDisplay(m.questionContext)), "\n")
+			b.WriteString(strings.Join(clampQuestionLines(lines, plan.contextRows-1, width), "\n") + "\n\n")
+		}
 		// The question in the brain's OWN words, and the labels in the order and
 		// under the numbers the runtime matches — never re-worded, re-ordered or
 		// renumbered (contract v3 §15 rule 5). Control characters are made inert
 		// for display only; a choice always sends the bytes the runtime sent.
 		qLines := strings.Split(wrap.Render(sanitizeQuestionDisplay(q.Question)), "\n")
-		b.WriteString(strings.Join(clampQuestionLines(qLines, questionRows, width), "\n") + "\n")
+		b.WriteString(strings.Join(clampQuestionLines(qLines, plan.questionRows, width), "\n") + "\n")
 		if subject := questionSubjectLine(q); subject != "" {
 			b.WriteString(DimStyle.Render(truncateCells(sanitizeQuestionDisplay(subject), width)) + "\n")
 		}
@@ -357,6 +364,12 @@ func (m model) View() string {
 		}
 		if note := questionPickerNote(q); note != "" {
 			b.WriteString("\n" + DimStyle.Render(wrap.Render(note)) + "\n")
+		}
+		// The status line the picker itself sets (a refusal, a notice) is drawn
+		// HERE: the overlay covers the status bar, so a notice left there would be
+		// set and never seen.
+		if m.saveStatus != "" {
+			b.WriteString("\n" + SidebarWarnStyle.Render(truncateCells(sanitizeQuestionDisplay(m.saveStatus), width)) + "\n")
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
 		return lipgloss.Place(
@@ -556,18 +569,36 @@ func (m model) questionOverlayChrome(q *PendingQuestion) int {
 		rendered := lipgloss.NewStyle().Width(questionWrapWidth(m.width)).Render(note)
 		rows += 1 + strings.Count(rendered, "\n") + 1
 	}
+	if m.saveStatus != "" {
+		rows += 2 // a blank plus the one-row status line
+	}
 	return rows
 }
 
+// questionOverlayLayout is what the picker may draw on this terminal: whether it
+// can be drawn whole at all, and how many rows the reply's surrounding prose,
+// the question text and the option list each get.
+type questionOverlayLayout struct {
+	fits         bool
+	contextRows  int // includes its trailing blank; < 2 means no context block
+	questionRows int
+	optionRows   int
+}
+
 // questionOverlayPlan decides whether the picker can be drawn whole on this
-// terminal and, if so, how many rows the question text and the option list each
-// get. fits=false means no overlay and no keys: a choice the operator cannot see
-// is not a choice (contract v3 §15 rule 6), and the client degrades to the
-// numbered list in the reply text.
-func (m model) questionOverlayPlan() (fits bool, questionRows, optionRows int) {
+// terminal and how the rows are shared out. fits=false means no overlay and no
+// keys: a choice the operator cannot see is not a choice (contract v3 §15
+// rule 6), and the client degrades to the numbered list in the reply text.
+//
+// Priority when rows are scarce: the option list first (it is the actionable
+// part), then the reply's surrounding prose (the runtime puts the lift warning
+// and the settings listing there), then the question text — which is the one
+// block that is also in the reply behind the overlay and is clipped with a
+// visible ellipsis rather than dropped.
+func (m model) questionOverlayPlan() questionOverlayLayout {
 	q := m.pendingQuestion
 	if q == nil || !m.questionPickerMode || !m.paneLayoutFits() {
-		return false, 0, 0
+		return questionOverlayLayout{}
 	}
 	chrome := m.questionOverlayChrome(q)
 	// A windowed list costs two "N more" rows at worst; reserved up front so the
@@ -582,18 +613,36 @@ func (m model) questionOverlayPlan() (fits bool, questionRows, optionRows int) {
 	}
 	// One row for the question, plus the fewest options worth showing.
 	if m.height < chrome+1+minOptions+moreRows {
-		return false, 0, 0
+		return questionOverlayLayout{}
 	}
 	budget := m.height - chrome - moreRows
-	optionRows = len(q.Options)
-	if optionRows > budget-1 {
-		optionRows = budget - 1
+	plan := questionOverlayLayout{fits: true}
+	plan.optionRows = len(q.Options)
+	if plan.optionRows > budget-1 {
+		plan.optionRows = budget - 1
 	}
-	questionRows = budget - optionRows
-	if questionRows < 1 {
-		questionRows = 1
+	rest := budget - plan.optionRows // always ≥ 1
+	if m.questionContext != "" {
+		want := m.renderedLineCount(m.questionContext) + 1 // + its trailing blank
+		if want > rest-1 {
+			want = rest - 1 // never at the cost of the question's last row
+		}
+		if want >= 2 {
+			plan.contextRows = want
+		}
 	}
-	return true, questionRows, optionRows
+	plan.questionRows = rest - plan.contextRows
+	if plan.questionRows < 1 {
+		plan.questionRows = 1
+	}
+	return plan
+}
+
+// renderedLineCount is how many rows text occupies once wrapped to the overlay's
+// width.
+func (m model) renderedLineCount(text string) int {
+	rendered := lipgloss.NewStyle().Width(questionWrapWidth(m.width)).Render(text)
+	return strings.Count(rendered, "\n") + 1
 }
 
 // questionOptionWindow returns the [start,end) slice of options to render, sized

@@ -587,7 +587,7 @@ func TestQuestionOverlayNeverOverflowsTheTerminal(t *testing.T) {
 					m.questionPickerMode = true
 					m.questionPickerIdx = idx
 
-					fits, _, _ := m.questionOverlayPlan()
+					fits := m.questionOverlayPlan().fits
 					out := m.View()
 					if !fits {
 						if strings.Contains(out, questionPickerTitle) {

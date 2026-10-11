@@ -371,7 +371,7 @@ pending** (the runtime builds it with no `exclude_none`).
 | `question_id` | The question's identity. Required and non-blank; a question without one is dropped by the runtime and must be treated as nothing pending. The client does not send it — the answer is matched by session and recency, not by id. |
 | `question` | The question **in the brain's own words**, already through the runtime's egress guards. Shown **verbatim**; never paraphrased, truncated or re-worded. |
 | `options` | The choice labels, **in order**. Their 1-based position in THIS list is the number the operator's answer may carry. The runtime admits two to four; the client accepts two or more and never reorders, filters or renumbers them. |
-| `allow_free_text` | `true` = the operator's own words are accepted **on the turn immediately after** the question, and only that turn. `false` = only a number or an exact option label counts. Either way the picker is offered and the input box stays live. |
+| `allow_free_text` | `true` = the operator's own words are accepted **on the turn immediately after** the question, and only that turn. `false` = only a number or an exact option label counts. Either way the picker is offered; it is modal while open, and Esc hands the keyboard back to the input box, which still answers. |
 | `kind` | Which question this is, and therefore **what answers it** (§15). Absent reads as `"question"`. |
 | `tool`, `target` | `permission` kind only: the tool being asked about and its scrubbed target. Present so a client can SHOW what is being asked about without parsing the sentence. Absent on every other kind. |
 | `source` | `cloud_read_consent` and `cloud_read_permissions` only: which of the operator's sources the question is about — one of `board`, `annex`, `files`, `memory`. Never anything read FROM the source. Absent on every other kind. |
@@ -428,9 +428,16 @@ text (its chunk is empty), so content parity holds.
    - the **decimal number** `i` — for every kind except the two fenced ones;
    - the **option label, verbatim** — for `permission` and `lift_read_only`.
 
-   A fenced kind whose label is itself all digits is **ambiguous on the wire** (the
-   runtime would read it as a position): the client sends nothing and puts the label
-   in the input box for the operator to send.
+   Two refusals, both on fenced kinds only:
+   - a label that is itself **all digits** is ambiguous on the wire (the runtime
+     would read it as a position): nothing is sent, and the label goes to the
+     input box for the operator to send;
+   - a label carrying **control characters** is refused outright and echoed
+     nowhere. A fenced answer is the label byte-exact, so those bytes would also
+     reach the transcript, the resize redraw and the input history, none of which
+     sanitise for display — and a `lift_read_only` label is written by the brain,
+     which neither the `ask_operator` validator nor the egress guards screen for
+     control characters.
 2. **Same session, always.** The session recorded with a question is the session
    **the turn ran on**, frozen when the turn was submitted — not whatever session
    the client happens to hold when the reply lands. (`:session new` is reachable
@@ -441,9 +448,10 @@ text (its chunk is empty), so content parity holds.
    the request runs.) If the session has since changed,
    the picker sends nothing and says why — the runtime would match the answer
    against nothing.
-3. **Esc sends nothing.** Closing the picker is not an answer. The question stays
-   answerable, because the reply text still carries the numbered list and the input
-   box still accepts a typed number or label.
+3. **Esc sends nothing.** Closing the picker is not an answer. The picker is
+   modal while it is open — like every other picker in this client — and Esc hands
+   the keyboard back to the input box. The question stays answerable either way,
+   because the reply text still carries the numbered list.
 4. **One picker.** A newer reply replaces the open picker outright; a reply with no
    question closes it. Any submission — typed, queued or picked — closes it, so one
    choice can never be sent twice.
@@ -468,7 +476,18 @@ text (its chunk is empty), so content parity holds.
      wide-character label is twice as wide as its rune count. The row budget is
      computed from what will actually be drawn, so the title, the key line and
      the selected option can never be pushed off the screen.
-6. **A choice the operator cannot see is not a choice.** The picker is offered
+6. **What the reply said AROUND the question is shown with it.** The runtime
+   deliberately keeps load-bearing sentences out of the question text — the
+   read-only lift warning, and the whole settings listing that is the "view" half
+   of `/permissions` — so a picker that covered the reply would hide exactly what
+   the operator is meant to read before choosing. The client carries that prose
+   with the question and draws it above it, and gives it rows ahead of the
+   question text when the terminal is short. It is obtained by a deterministic
+   filter on strings the client already holds verbatim (drop the question line,
+   drop `"<n>. <label>"` for the option actually at position n, collapse blank
+   runs) — never by reading the prose. Any notice the picker itself raises is
+   drawn inside the overlay too, since the overlay covers the status bar.
+7. **A choice the operator cannot see is not a choice.** The picker is offered
    only when it can be drawn WHOLE. One predicate decides both whether the
    overlay renders and whether it owns the keyboard, so the screen and the keys
    can never disagree; on a terminal too small the client degrades to exactly
@@ -477,7 +496,7 @@ text (its chunk is empty), so content parity holds.
    screen: with a windowed list the key line stops offering the numbers at all,
    and a number naming a scrolled-away option does nothing — while a number
    naming a row that IS printed still chooses that row.
-7. **`:permissions`** sends the literal message `/permissions` on the current
+8. **`:permissions`** sends the literal message `/permissions` on the current
    session, and nothing else: the runtime's own recognizer requires it as the whole
    message. The two-step flow that follows (pick a source, then pick its setting) is
    driven entirely by the `pending_question` of each reply — the client holds no
@@ -514,6 +533,7 @@ type PendingQuestion struct {
 | new, question armed, kind takes a number | object, 2–4 options | picker opens; a choice sends the option's number on the same session |
 | new, question armed, `permission` / `lift_read_only` | object | picker opens; a choice sends the option label typed out verbatim — never a number |
 | new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
+| question armed, fenced kind with a control character in the label | object | picker sends nothing and echoes nothing; it says the option cannot be sent safely |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
 | question armed, session changed since | object | picker sends nothing and says the session changed |
 | question armed, turn still in flight | object | picker sends nothing and says Billy is still working (defensive: a submission closes the picker, so the client's own flow does not reach this) |

@@ -78,6 +78,11 @@ type model struct {
 	questionPickerMode bool
 	questionPickerIdx  int
 	questionSession    string
+	// questionContext is what the reply said AROUND the question — the prose the
+	// runtime deliberately keeps out of the question text (the read-only lift
+	// warning, the /permissions settings listing). Shown above the question so
+	// the overlay cannot hide what the operator should read before choosing.
+	questionContext string
 	// turnSession is the session the CURRENT turn was submitted on, frozen at
 	// submit. A question is stamped with this rather than with whatever session
 	// the client holds when the reply lands, so ':session new' typed while Billy
