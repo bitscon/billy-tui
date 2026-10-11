@@ -1324,19 +1324,32 @@ func TestAdoptedQuestionCarriesTheReplyProse(t *testing.T) {
 	}
 }
 
-// A notice the picker sets is drawn INSIDE the overlay: the overlay covers the
-// status bar, so a notice left there would be set and never seen.
-func TestPickerNoticeIsVisibleInsideTheOverlay(t *testing.T) {
+// Every picker refusal CLOSES the picker and reports on the status bar, which is
+// visible again the moment the overlay is gone. A notice drawn inside the
+// overlay had to be budgeted for, and budgeting for it either made the whole
+// picker vanish on a short terminal or cost the operator the prose he was meant
+// to read. The question stays answerable from the input box, exactly as after
+// esc.
+func TestPickerRefusalClosesThePickerAndIsVisible(t *testing.T) {
 	m := questionModel(t, testConsentQuestion())
 	m.isStreaming = true // forces the busy refusal
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("a busy refusal must send nothing")
+	}
+	if nm.questionPickerMode {
+		t.Fatalf("a refusal must close the picker so its notice is visible")
+	}
+	if nm.pendingQuestion == nil {
+		t.Fatalf("the question must stay answerable")
+	}
 	if nm.saveStatus != questionBusyNotice {
 		t.Fatalf("status = %q, want the busy notice", nm.saveStatus)
 	}
 	if !strings.Contains(nm.View(), "still working") {
-		t.Fatalf("the notice is not visible on the picker screen:\n%s", nm.View())
+		t.Fatalf("the notice is not visible:\n%s", nm.View())
 	}
 }
 
@@ -1647,41 +1660,10 @@ func TestQuestionKeepsItsRowsAgainstTheProse(t *testing.T) {
 	}
 }
 
-// Whether the picker can be drawn at all must NEVER depend on transient state:
-// counting the notice row only when a notice was showing made the picker vanish
-// for a band of terminal heights the moment any notice appeared, and come back
-// by itself when it expired.
-func TestPickerFitDoesNotDependOnANotice(t *testing.T) {
-	questions := []*PendingQuestion{
-		testConsentQuestion(),
-		{QuestionID: "q", Question: "Lift it?", Options: []string{"approve", "no"}, Kind: questionKindLift},
-		{QuestionID: "q", Question: "May I?", Options: []string{"allow once", "deny"},
-			Kind: questionKindPermission, Tool: "write_file", Target: "notes/today.md"},
-		{QuestionID: "q", Question: "Which?", Options: []string{"a", "b"}, Kind: questionKindDefault},
-	}
-	for _, q := range questions {
-		for _, w := range []int{60, 100, 160} {
-			for h := 8; h <= 40; h++ {
-				build := func(notice string) bool {
-					m := initialModel(&billyClient{sessionID: "tui-1"})
-					sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
-					m = sized.(model)
-					m.pendingQuestion = q
-					m.questionPickerMode = true
-					m.questionNotice = notice
-					return m.questionOverlayPlan().fits
-				}
-				if build("") != build(questionBusyNotice) {
-					t.Fatalf("%dx%d kind=%s: a notice changed whether the picker exists", w, h, q.Kind)
-				}
-			}
-		}
-	}
-}
-
-// The picker's notice is its OWN. A leftover notice about an export, a model
-// switch or an abandoned turn must never be drawn on the screen a consent
-// choice is sent from.
+// The overlay never draws the client's global status line. A notice about an
+// export, a model switch or an abandoned turn has no business on the screen a
+// consent choice is sent from — and the picker's own refusals report there
+// instead, after closing the picker, so the status bar is visible again.
 func TestGlobalStatusNoticesStayOffTheConsentScreen(t *testing.T) {
 	m := initialModel(&billyClient{sessionID: "tui-1"})
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
@@ -1691,8 +1673,8 @@ func TestGlobalStatusNoticesStayOffTheConsentScreen(t *testing.T) {
 
 	next, _ := m.Update(responseMsg{text: "pick one", Question: testConsentQuestion(), Gen: 0})
 	nm := next.(model)
-	if nm.questionNotice != "" {
-		t.Fatalf("a fresh question must carry no notice, got %q", nm.questionNotice)
+	if !nm.questionPickerMode {
+		t.Fatalf("the picker should be open")
 	}
 	if strings.Contains(nm.View(), "Exported") {
 		t.Fatalf("an unrelated status notice is drawn on the consent screen:\n%s", nm.View())
@@ -1768,28 +1750,54 @@ func TestReservedMoreRowsGoBackWhenTheListIsWhole(t *testing.T) {
 	}
 }
 
-// The notice is spent out of rows that are left over, so it never decides
-// whether the picker exists and never costs the question or the prose a row.
-func TestNoticeIsSpentOnlyOutOfSpareRows(t *testing.T) {
-	q := testConsentQuestion()
-	for _, w := range []int{60, 100, 160} {
-		for h := 8; h <= 40; h++ {
-			build := func(notice string) questionOverlayLayout {
-				m := initialModel(&billyClient{sessionID: "tui-1"})
-				sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
-				m = sized.(model)
-				m.pendingQuestion = q
-				m.questionPickerMode = true
-				m.questionNotice = notice
-				return m.questionOverlayPlan()
-			}
-			bare, noticed := build(""), build(questionBusyNotice)
-			if bare.fits != noticed.fits {
-				t.Fatalf("%dx%d: a notice changed whether the picker exists", w, h)
-			}
-			if noticed.fits && noticed.optionRows != bare.optionRows {
-				t.Fatalf("%dx%d: a notice cost the option list rows (%d → %d)",
-					w, h, bare.optionRows, noticed.optionRows)
+// Nothing is clipped or dropped while a row sits empty, and the plan never
+// promises more rows than the overlay has.
+func TestPlanSpendsEveryRowItHas(t *testing.T) {
+	questions := []*PendingQuestion{
+		testConsentQuestion(),
+		{QuestionID: "q", Question: strings.Repeat("a long question. ", 40),
+			Options: []string{"approve", "no"}, Kind: questionKindLift},
+		{QuestionID: "q", Question: "May I?", Options: []string{"allow once", "deny"},
+			Kind: questionKindPermission, Tool: "write_file", Target: "notes/today.md"},
+	}
+	proses := []string{"", "one line of prose", strings.Repeat("prose line\n", 40)}
+	for _, q := range questions {
+		for _, prose := range proses {
+			for _, w := range []int{60, 100, 160} {
+				for h := 8; h <= 60; h++ {
+					m := initialModel(&billyClient{sessionID: "tui-1"})
+					sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+					m = sized.(model)
+					m.pendingQuestion = q
+					m.questionContext = prose
+					m.questionPickerMode = true
+
+					plan := m.questionOverlayPlan()
+					if !plan.fits {
+						continue
+					}
+					spent := HelpOverlayStyle.GetVerticalFrameSize() + 3 + plan.subjectRows + 1 +
+						plan.questionRows + plan.optionRows + plan.noteRows + plan.contextRows
+					start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), plan.optionRows)
+					if start > 0 {
+						spent++
+					}
+					if end < len(q.Options) {
+						spent++
+					}
+					if spent > h {
+						t.Fatalf("%dx%d: the plan promises %d rows", w, h, spent)
+					}
+					// A clipped question, or prose dropped outright, is only
+					// honest when there was genuinely nothing left to give.
+					if plan.questionRows < m.renderedLineCount(q.Question) && spent < h {
+						t.Fatalf("%dx%d: question clipped to %d with %d rows unused",
+							w, h, plan.questionRows, h-spent)
+					}
+					if prose != "" && plan.contextRows == 0 && spent <= h-2 {
+						t.Fatalf("%dx%d: prose dropped with %d rows unused", w, h, h-spent)
+					}
+				}
 			}
 		}
 	}
@@ -1844,6 +1852,27 @@ func TestMultiLineOptionLabelLeavesNoForgedListLine(t *testing.T) {
 	for _, unwanted := range []string{"1. approve", "2. keep it read-only"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("a numbered line survived into the prose: %q\n%s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "Reply with the option itself.") {
+		t.Fatalf("the closing line was lost:\n%s", got)
+	}
+}
+
+// A label the runtime padded still matches, so no padded numbered line is left
+// standing in the prose block.
+func TestPaddedOptionLabelIsStillDroppedFromTheContext(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{" approve", "keep it read-only"},
+		Kind:    questionKindLift,
+	}
+	got := questionContext("Lift the hold?\n\n1.  approve\n2. keep it read-only\n\nReply with the option itself.", q)
+	for _, unwanted := range []string{"1.", "2."} {
+		for _, line := range strings.Split(got, "\n") {
+			if strings.HasPrefix(line, unwanted) {
+				t.Fatalf("a numbered line survived into the prose: %q\n%s", line, got)
+			}
 		}
 	}
 	if !strings.Contains(got, "Reply with the option itself.") {

@@ -330,12 +330,11 @@ func (m model) View() string {
 			questionPickerHint(q, start == 0 && end == len(q.Options)), width)) + "\n\n")
 		// What the reply said AROUND the question comes first, because that is
 		// where the runtime puts the sentences the operator must read before
-		// choosing — the read-only lift warning, the settings listing.
-		if plan.contextRows >= 2 && m.questionContext != "" {
-			// Sanitised PER LINE and rejoined: every newline in this block was put
-			// there by the client's own filter, not by the brain, so flattening
-			// them ran the /permissions settings listing — the thing §15 rule 6
-			// names — into one unreadable paragraph (self-review wave 6).
+		// choosing — the read-only lift warning, the settings listing. Sanitised
+		// PER LINE and rejoined: every newline in this block was put there by the
+		// client's own filter, not by the brain, so flattening them ran the
+		// /permissions listing into one unreadable paragraph.
+		if plan.contextRows >= 2 {
 			lines := strings.Split(wrap.Render(sanitizeQuestionLines(m.questionContext)), "\n")
 			b.WriteString(strings.Join(clampQuestionLines(lines, plan.contextRows-1, width), "\n") + "\n\n")
 		}
@@ -345,8 +344,9 @@ func (m model) View() string {
 		// for display only; a choice always sends the bytes the runtime sent.
 		qLines := strings.Split(wrap.Render(sanitizeQuestionDisplay(q.Question)), "\n")
 		b.WriteString(strings.Join(clampQuestionLines(qLines, plan.questionRows, width), "\n") + "\n")
-		if subject := questionSubjectLine(q); subject != "" {
-			b.WriteString(DimStyle.Render(truncateCells(sanitizeQuestionDisplay(subject), width)) + "\n")
+		if plan.subjectRows > 0 {
+			b.WriteString(DimStyle.Render(truncateCells(
+				sanitizeQuestionDisplay(questionSubjectLine(q)), width)) + "\n")
 		}
 		b.WriteString("\n")
 		if start > 0 {
@@ -366,17 +366,8 @@ func (m model) View() string {
 		if end < len(q.Options) {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↓ %d more", len(q.Options)-end)) + "\n")
 		}
-		if note := questionPickerNote(q); note != "" {
-			b.WriteString("\n" + DimStyle.Render(wrap.Render(note)) + "\n")
-		}
-		// The notice the picker itself raised is drawn HERE: the overlay covers
-		// the status bar, so a notice left there would be set and never seen.
-		// It is the PICKER's own field, never the client's global status line —
-		// a leftover "✓ Exported …" or "Abandoned …" drawn on the screen a
-		// consent choice is about to be sent from is a sentence about something
-		// else entirely (self-review wave 5).
-		if plan.noticeRows >= 2 && m.questionNotice != "" {
-			b.WriteString("\n" + SidebarWarnStyle.Render(truncateCells(sanitizeQuestionDisplay(m.questionNotice), width)) + "\n")
+		if plan.noteRows > 0 {
+			b.WriteString("\n" + wrap.Render(DimStyle.Render(questionPickerNote(q))) + "\n")
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
 		return lipgloss.Place(
@@ -565,48 +556,17 @@ func truncateCells(s string, max int) string {
 	return "…"
 }
 
-// questionOverlayChrome counts the rows the overlay spends on everything that is
-// NOT the question text or the option list, for this question on this terminal:
-// the style's border and padding, the title, the key line, the blank under it,
-// the blank above the options, a subject line where there is one, and the note
-// (a blank plus its wrapped lines) where there is one.
-//
-// Computed from what will actually be written, never from a constant: a constant
-// under-counted the padding, the subject and the wrapped note by three to five
-// rows, and the overflow came off the TOP of the screen — taking the title and
-// the key line with it (self-review wave 2).
-func (m model) questionOverlayChrome(q *PendingQuestion) int {
-	rows := HelpOverlayStyle.GetVerticalFrameSize()
-	rows += 1 // the title
-	rows += 1 // the key line, truncated to one row on render
-	rows += 2 // the blank under the key line, the blank above the options
-	if questionSubjectLine(q) != "" {
-		rows++
-	}
-	if note := questionPickerNote(q); note != "" {
-		rendered := lipgloss.NewStyle().Width(questionWrapWidth(m.width)).Render(note)
-		rows += 1 + strings.Count(rendered, "\n") + 1
-	}
-	// The notice line is DELIBERATELY NOT counted here. Whether the picker can be
-	// drawn at all must not depend on transient state: counting it only when a
-	// notice was set made `fits` flip false for a band of terminal heights the
-	// moment any notice appeared, so the picker silently vanished and came back
-	// by itself when the notice expired (self-review wave 5). Counting it always
-	// fixed that but raised the smallest terminal the picker is offered on by two
-	// rows (wave 6). So the fit gate ignores it, and the plan spends two rows on
-	// it only when the content can spare them.
-	return rows
-}
-
 // questionOverlayLayout is what the picker may draw on this terminal: whether it
-// can be drawn whole at all, and how many rows the reply's surrounding prose,
-// the question text and the option list each get.
+// can be drawn whole at all, and how many rows each block gets. The view renders
+// EXACTLY these counts, so there is one place the arithmetic lives and one place
+// to check it.
 type questionOverlayLayout struct {
 	fits         bool
-	contextRows  int // includes its trailing blank; < 2 means no context block
-	questionRows int
-	optionRows   int
-	noticeRows   int // includes its leading blank; < 2 means no notice line
+	contextRows  int // the prose block + its trailing blank; < 2 means no block
+	questionRows int // ≥ 1 whenever fits
+	subjectRows  int // 0 or 1
+	optionRows   int // how many options are rendered; the rest are windowed away
+	noteRows     int // the note's leading blank + its lines; 0 means no note
 }
 
 // questionOverlayPlan decides whether the picker can be drawn whole on this
@@ -614,82 +574,121 @@ type questionOverlayLayout struct {
 // keys: a choice the operator cannot see is not a choice (contract v3 §15
 // rule 7), and the client degrades to the numbered list in the reply text.
 //
-// Priority when rows are scarce:
-//  1. the option list — the actionable part;
-//  2. the question text, up to the rows it actually needs — it is the sentence
-//     being answered, and on a privilege-escalation question it is the one the
+// The allocation is one pass, in a fixed priority order, and every block is
+// charged for what will ACTUALLY be drawn:
+//
+//  1. the option list — the actionable part — plus only the scroll indicators
+//     that really appear;
+//  2. the question text, up to the rows it needs — it is the sentence being
+//     answered, and on a privilege-escalation question it is the one the
 //     operator must read in full;
-//  3. the reply's surrounding prose, which keeps at least one line plus its
-//     blank whenever there is any, clipped with a visible ellipsis;
-//  4. the notice line, only if rows remain after all of the above.
+//  3. the note, all of it or none;
+//  4. the reply's surrounding prose, clipped with a visible ellipsis;
+//  5. anything still unspent goes back to the question, so nothing is clipped
+//     while a row sits empty.
+//
+// A refusal the picker raises is NOT drawn here: every refusal closes the
+// picker and reports on the status bar, which is visible again the moment the
+// overlay is gone. That is deliberate — a notice drawn inside the overlay had
+// to be budgeted for, and budgeting for it either made `fits` depend on
+// transient state or cost the prose its rows.
 func (m model) questionOverlayPlan() questionOverlayLayout {
 	q := m.pendingQuestion
 	if q == nil || !m.questionPickerMode || !m.paneLayoutFits() {
 		return questionOverlayLayout{}
 	}
-	chrome := m.questionOverlayChrome(q)
-	// A windowed list costs two "N more" rows at worst; reserved up front so the
-	// budget holds whichever way the window lands.
-	moreRows := 0
-	if len(q.Options) > questionMinOptionRows {
-		moreRows = 2
+	plan := questionOverlayLayout{}
+	if questionSubjectLine(q) != "" {
+		plan.subjectRows = 1
 	}
-	minOptions := len(q.Options)
-	if minOptions > questionMinOptionRows {
-		minOptions = questionMinOptionRows
+	// Rows the overlay always spends: the style's border and padding, the title,
+	// the key line, the blank under it, the subject line where there is one, and
+	// the blank above the options.
+	fixed := HelpOverlayStyle.GetVerticalFrameSize() + 3 + plan.subjectRows + 1
+	available := m.height - fixed
+	// The floor: one row of question, and the fewest options worth showing plus
+	// the indicators that windowing them would cost.
+	floorOptions := len(q.Options)
+	floorIndicators := 0
+	if floorOptions > questionMinOptionRows {
+		floorOptions = questionMinOptionRows
+		floorIndicators = 2
 	}
-	// One row for the question, plus the fewest options worth showing.
-	if m.height < chrome+1+minOptions+moreRows {
+	if available < 1+floorOptions+floorIndicators {
 		return questionOverlayLayout{}
 	}
-	budget := m.height - chrome - moreRows
-	plan := questionOverlayLayout{fits: true}
+
+	// 1. The option list, charged for the indicators that will really be drawn.
 	plan.optionRows = len(q.Options)
-	if plan.optionRows > budget-1 {
-		plan.optionRows = budget - 1
-	}
-	if plan.optionRows == len(q.Options) {
-		// The whole list is on screen, so no "N more" row is drawn after all:
-		// the rows reserved for them go back to the content (self-review wave 6
-		// — reserved-and-never-returned dropped the consent screen's prose while
-		// two rows sat empty).
-		budget += moreRows
-	}
-	// The notice line is spent only out of what is left over.
-	if m.questionNotice != "" && budget-2 >= 1+plan.optionRows {
-		plan.noticeRows = 2
-		budget -= 2
-	}
-	rest := budget - plan.optionRows // always ≥ 1
-	// The QUESTION's own rows come first, up to what it actually needs: it is the
-	// sentence being answered, and on a privilege-escalation question it is the
-	// one the operator must read in full. Taking the prose's share off the top
-	// clipped a two-row question to one (self-review wave 5).
-	want := m.renderedLineCount(q.Question)
-	if m.questionContext != "" && want > rest-2 {
-		// Leave the prose at least one line plus its blank: a warning clipped to
-		// an ellipsis is still a warning, one dropped entirely is silence.
-		want = rest - 2
-		if want < 1 {
-			want = 1
+	if plan.optionRows > available-1 {
+		plan.optionRows = available - 1 - 2 // two indicator rows at worst
+		if plan.optionRows < 1 {
+			plan.optionRows = 1
 		}
 	}
-	if want > rest {
-		want = rest
+	start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), plan.optionRows)
+	indicators := 0
+	if start > 0 {
+		indicators++
 	}
-	plan.questionRows = want
-	if remaining := rest - plan.questionRows; m.questionContext != "" && remaining >= 2 {
-		contextWant := m.renderedLineCount(m.questionContext) + 1 // + its trailing blank
-		if contextWant > remaining {
-			contextWant = remaining
-		}
-		plan.contextRows = contextWant
+	if end < len(q.Options) {
+		indicators++
 	}
-	// Anything the prose did not need goes back to the question.
-	plan.questionRows = rest - plan.contextRows
+	remaining := available - plan.optionRows - indicators
+
+	// What blocks 3 and 4 would like, held back from the question's growth so a
+	// long question cannot starve them.
+	noteWant := 0
+	if note := questionPickerNote(q); note != "" {
+		noteWant = 1 + m.renderedLineCount(note)
+	}
+	contextWant := 0
+	if m.questionContext != "" {
+		contextWant = 1 + m.renderedLineCount(m.questionContext)
+	}
+
+	// 2. The question, capped so the note and at least one line of prose survive.
+	reserve := noteWant
+	if contextWant > 0 {
+		reserve += 2
+	}
+	questionWant := m.renderedLineCount(q.Question)
+	plan.questionRows = questionWant
+	if cap := remaining - reserve; plan.questionRows > cap {
+		plan.questionRows = cap
+	}
 	if plan.questionRows < 1 {
 		plan.questionRows = 1
 	}
+	if plan.questionRows > remaining {
+		plan.questionRows = remaining
+	}
+	remaining -= plan.questionRows
+
+	// 3. The note: all of it or none of it.
+	if noteWant > 0 && remaining >= noteWant {
+		plan.noteRows = noteWant
+		remaining -= noteWant
+	}
+
+	// 4. The prose, clipped rather than dropped whenever two rows can be spared.
+	if contextWant > 0 && remaining >= 2 {
+		plan.contextRows = contextWant
+		if plan.contextRows > remaining {
+			plan.contextRows = remaining
+		}
+		remaining -= plan.contextRows
+	}
+
+	// 5. Nothing is clipped while a row sits empty.
+	if remaining > 0 && plan.questionRows < questionWant {
+		give := questionWant - plan.questionRows
+		if give > remaining {
+			give = remaining
+		}
+		plan.questionRows += give
+	}
+	plan.fits = true
 	return plan
 }
 

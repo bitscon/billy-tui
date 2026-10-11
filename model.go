@@ -83,11 +83,6 @@ type model struct {
 	// warning, the /permissions settings listing). Shown above the question so
 	// the overlay cannot hide what the operator should read before choosing.
 	questionContext string
-	// questionNotice is the picker's OWN notice line, drawn inside the overlay
-	// (which covers the status bar). Deliberately not the client's global
-	// saveStatus: a leftover notice about an export or a model switch has no
-	// business on the screen a consent choice is sent from.
-	questionNotice string
 	// turnSession is the session the CURRENT turn was submitted on, frozen at
 	// submit. A question is stamped with this rather than with whatever session
 	// the client holds when the reply lands, so ':session new' typed while Billy

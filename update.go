@@ -543,7 +543,6 @@ func (m *model) currentSessionID() string {
 func (m *model) adoptPendingQuestion(q *PendingQuestion, message string) {
 	m.questionPickerIdx = 0
 	m.pendingQuestion = q
-	m.questionNotice = ""
 	if q == nil {
 		m.questionPickerMode = false
 		m.questionSession = ""
@@ -569,7 +568,6 @@ func (m *model) clearPendingQuestion() {
 	m.questionPickerIdx = 0
 	m.questionSession = ""
 	m.questionContext = ""
-	m.questionNotice = ""
 }
 
 // questionContext is what the reply said AROUND the question: the whole message
@@ -655,8 +653,21 @@ func matchNumberedOption(lines []string, i int, options []string) int {
 	if err != nil || position < 1 || position > len(options) {
 		return 0
 	}
-	want := trimmedLines(fmt.Sprintf("%d. %s", position, strings.TrimSpace(options[position-1])))
-	return matchRun(lines, i, want)
+	// The FIRST line is compared on its trimmed remainder, so a label the
+	// runtime padded still matches (a byte-exact comparison left "1.  approve"
+	// standing in the prose block for a label of " approve"). Later lines of a
+	// multi-line label are matched as a run.
+	labelLines := trimmedLines(options[position-1])
+	if strings.TrimSpace(line[dot+2:]) != labelLines[0] {
+		return 0
+	}
+	if len(labelLines) == 1 {
+		return 1
+	}
+	if n := matchRun(lines, i+1, labelLines[1:]); n > 0 {
+		return 1 + n
+	}
+	return 1
 }
 
 // chooseQuestionOption answers the open question with the option at idx, over
@@ -678,8 +689,13 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 		return nil
 	}
 	if m.thinking || m.isStreaming {
-		// The picker stays open, so this one is drawn inside the overlay.
-		m.questionNotice = questionBusyNotice
+		// EVERY refusal closes the picker, so the status bar is visible again and
+		// is the one place a refusal is reported. A notice drawn inside the
+		// overlay had to be budgeted for, and budgeting for it either made the
+		// whole picker vanish on a short terminal or cost the operator the prose
+		// he was meant to read (self-review waves 5 to 7). The question stays
+		// answerable from the input box, exactly as after esc.
+		m.questionPickerMode = false
 		m.saveStatus = questionBusyNotice
 		m.saveStatusTicks = 4
 		return nil
@@ -690,21 +706,18 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 		switch {
 		case !stageable:
 			// The label is not safe to put anywhere the terminal will act on it.
-			m.questionNotice = questionUnsafeLabelNotice
+			m.saveStatus = questionUnsafeLabelNotice
 		case m.input.Value() == "":
 			// Put it in front of the operator so they do not have to retype it,
 			// but only into an EMPTY box — a draft they are writing is theirs.
 			m.input.SetValue(text)
 			m.refreshInputHeight()
-			m.questionNotice = questionTypeItNotice
+			m.saveStatus = questionTypeItNotice
 		default:
 			// The notice has to say what actually happened: claiming the label is
 			// in the box when it was dropped is simply untrue.
-			m.questionNotice = questionTypeItYourselfNotice
+			m.saveStatus = questionTypeItYourselfNotice
 		}
-		// The picker is closed on these paths, so the notice is also mirrored to
-		// the status bar where the operator can still see it.
-		m.saveStatus = m.questionNotice
 		m.saveStatusTicks = 4
 		return nil
 	}

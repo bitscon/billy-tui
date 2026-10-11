@@ -492,15 +492,17 @@ text (its chunk is empty), so content parity holds.
    runs) — never by reading the prose, and a question or an option label that is
    itself several lines is dropped as one block so no part of it can appear
    twice. Rows go to the option list first, then to the question up to what it
-   needs, then to the prose, which always keeps at least one line and is clipped
-   with a visible ellipsis rather than dropped. The prose keeps its own line
+   needs, then to the note, then to the prose — which is clipped with a visible
+   ellipsis whenever two rows can be spared for it, and only dropped when there
+   are none; anything still unspent goes back to the question, so nothing is
+   clipped while a row sits empty. The prose keeps its own line
    structure on screen: the `/permissions` settings listing is a list, and
-   flattening it would make it unreadable. Any notice the picker itself raises is drawn
-   inside the overlay too, since the overlay covers the status bar — and it is
-   the picker's OWN notice, never the client's global status line, so a leftover
-   sentence about an export or a model switch is never drawn on the screen a
-   choice is sent from. Whether the picker can be drawn at all never depends on
-   whether a notice is showing.
+   flattening it would make it unreadable. The overlay never draws the client's
+   global status line, so a leftover sentence about an export or a model switch
+   is never shown on the screen a choice is sent from; and **every refusal the
+   picker raises closes the picker** and reports on the status bar, which is
+   visible again the moment the overlay is gone. Nothing about the operator's
+   transient state can therefore change whether the picker is drawn at all.
 7. **A choice the operator cannot see is not a choice.** The picker is offered
    only when it can be drawn WHOLE. One predicate decides both whether the
    overlay renders and whether it owns the keyboard, so the screen and the keys
@@ -548,10 +550,10 @@ type PendingQuestion struct {
 | new, question armed, `permission` / `lift_read_only` | object | picker opens; a choice sends the option label typed out verbatim — never a number |
 | new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
 | question armed, fenced kind with a control character in the label | object | picker sends nothing and echoes nothing; it says the option cannot be sent safely |
-| question armed, reply carried prose around the question | object | the prose is drawn above the question, keeping at least one line, clipped with an ellipsis rather than dropped |
+| question armed, reply carried prose around the question | object | the prose is drawn above the question, clipped with an ellipsis whenever two rows can be spared for it |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
 | question armed, session changed since | object | picker sends nothing and says the session changed |
-| question armed, turn still in flight | object | picker sends nothing and says Billy is still working (defensive: a submission closes the picker, so the client's own flow does not reach this) |
+| question armed, turn still in flight | object | picker sends nothing, closes, and the status bar says Billy is still working (defensive: a submission closes the picker, so the client's own flow does not reach this) |
 | question armed, terminal too small to draw the picker whole | object | overlay is not drawn, picker owns no keys, nothing sent; the numbered list in the reply text still answers |
 | question armed, more options than fit on screen | object | list windowed with a "N more" row; the key line stops advertising the numbers, a number naming a scrolled-away option does nothing, and a number naming a visible row still chooses it |
 | question armed, text or label carries control characters | object | the controls are made inert on screen; a choice still sends the bytes as received |
