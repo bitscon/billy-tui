@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1388,5 +1389,80 @@ func TestFencedLabelIsSentByteExact(t *testing.T) {
 	}
 	if got := nm.messages[len(nm.messages)-1]; got != "[You] "+label {
 		t.Fatalf("sent %q, want the label byte-exact %q", got, "[You] "+label)
+	}
+}
+
+// A number key must never answer with an option the window has scrolled off
+// screen: the operator would be choosing a label they cannot see.
+func TestQuestionNumberKeyIgnoresAnOffScreenOption(t *testing.T) {
+	many := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		many = append(many, fmt.Sprintf("option number %d", i+1))
+	}
+	m := questionModel(t, &PendingQuestion{
+		QuestionID: "q-1", Question: "Which?", Options: many, Kind: "question",
+	})
+	m.questionPickerIdx = 25
+
+	fits, _, optionRows := m.questionOverlayPlan()
+	if !fits {
+		t.Fatalf("the overlay should be drawable at 100x32")
+	}
+	start, _ := questionOptionWindow(25, 40, optionRows)
+	if start == 0 {
+		t.Fatalf("the list should be windowed away from option 1 for this test")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("a number naming an off-screen option must send nothing")
+	}
+	if len(nm.messages) != 0 {
+		t.Fatalf("nothing must reach the transcript: %q", nm.messages)
+	}
+	if nm.questionPickerIdx != 25 {
+		t.Fatalf("the selection must not move, got %d", nm.questionPickerIdx)
+	}
+	// And the key line does not offer the numbers while the list is windowed.
+	if strings.Contains(m.View(), "choose · enter") && strings.Contains(m.View(), "1–") {
+		t.Fatalf("the key line offers numbers for a windowed list:\n%s", m.View())
+	}
+}
+
+// A terminal that clears the two-pane floor but is still too short to draw the
+// picker whole owns no picker keys either: the gate is the render plan, not the
+// pane layout.
+func TestQuestionPickerOwnsNoKeysWhenTheOverlayWouldNotFit(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 12})
+	m = sized.(model)
+	m.pendingQuestion = &PendingQuestion{
+		QuestionID: "q-1", Question: "May I write that file?",
+		Options: []string{"allow once", "allow for this session", "deny"},
+		Kind:    questionKindPermission, Tool: "write_file", Target: "notes/today.md",
+	}
+	m.questionSession = "tui-1"
+	m.turnSession = "tui-1"
+	m.questionPickerMode = true
+
+	if !m.paneLayoutFits() {
+		t.Fatalf("100x12 clears the two-pane floor")
+	}
+	if fits, _, _ := m.questionOverlayPlan(); fits {
+		t.Fatalf("a permission question needs more than 12 rows")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("an undrawable picker must send nothing")
+	}
+	for _, line := range nm.messages {
+		if strings.HasPrefix(line, "[You] ") {
+			t.Fatalf("an undrawable picker put an answer on the wire: %q", line)
+		}
+	}
+	if strings.Contains(m.View(), questionPickerTitle) {
+		t.Fatalf("an undrawable picker must not be drawn:\n%s", m.View())
 	}
 }

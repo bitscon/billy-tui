@@ -252,10 +252,11 @@ type routingSetMsg struct {
 }
 
 type StreamChunkMsg struct {
-	Chunk  string
-	Prompt string
-	Gen    int
-	events <-chan streamEvent
+	Chunk   string
+	Prompt  string
+	Session string // the session this turn is running on
+	Gen     int
+	events  <-chan streamEvent
 }
 type StreamDoneMsg struct {
 	FullText string
@@ -265,9 +266,10 @@ type StreamDoneMsg struct {
 	Gen      int
 }
 type StreamErrMsg struct {
-	Prompt string
-	Err    error
-	Gen    int
+	Prompt  string
+	Session string // the session this turn was started on; the fallback reuses it
+	Err     error
+	Gen     int
 }
 
 // sessionIDOf is the client's session id, or "" when there is no client (the

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // The model picker must window a long list to the terminal height, keep the
@@ -548,24 +549,89 @@ func TestQuestionOverlayIsHeightBounded(t *testing.T) {
 	}
 }
 
-// The row split always fits, and the window always keeps the selection visible.
-func TestQuestionOverlayRowsAndWindow(t *testing.T) {
-	for _, h := range []int{8, 12, 24, 40, 100} {
-		for _, opts := range []int{2, 4, 40, 400} {
-			qr, or := questionOverlayRows(h, opts)
-			if qr < 1 || or < 1 {
-				t.Fatalf("height %d / %d options: rows (%d,%d) must both be ≥1", h, opts, qr, or)
-			}
-			if or > opts {
-				t.Fatalf("height %d / %d options: option rows %d exceeds the list", h, opts, or)
-			}
-			for _, idx := range []int{0, opts / 2, opts - 1} {
-				start, end := questionOptionWindow(idx, opts, or)
-				if idx < start || idx >= end {
-					t.Fatalf("window [%d,%d) hides the selection %d", start, end, idx)
+// The overlay NEVER renders more rows than the terminal has, for any kind, any
+// option count, any selection and any size it agrees to draw at — and when it
+// will not fit it is not drawn at all and owns no keys. This is the row-budget
+// regression: a constant chrome estimate under-counted the padding, the subject
+// line and the wrapped note, and the overflow came off the TOP of the screen,
+// taking the title and the key line with it.
+func TestQuestionOverlayNeverOverflowsTheTerminal(t *testing.T) {
+	kinds := []*PendingQuestion{
+		{QuestionID: "q", Question: "short?", Options: []string{"a", "b"}, Kind: "cloud_read_consent"},
+		{QuestionID: "q", Question: strings.Repeat("a long question. ", 80),
+			Options: []string{"Allow once", "Allow for this conversation", "Always allow", "Don't allow"},
+			Kind:    "cloud_read_consent"},
+		{QuestionID: "q", Question: strings.Repeat("may I write that file? ", 40),
+			Options: []string{"allow once", "allow for this session", "deny"},
+			Kind:    questionKindPermission, Tool: "write_file", Target: "notes/today.md"},
+		{QuestionID: "q", Question: "lift it?", Options: []string{"approve", "no"}, Kind: questionKindLift},
+		{QuestionID: "q", Question: "your words?", Options: []string{"a", "b"}, Kind: questionKindDefault, AllowFreeText: true},
+	}
+	many := make([]string, 0, 400)
+	for i := 0; i < 400; i++ {
+		many = append(many, fmt.Sprintf("option number %d", i+1))
+	}
+	kinds = append(kinds,
+		&PendingQuestion{QuestionID: "q", Question: strings.Repeat("which one? ", 50), Options: many, Kind: "question"},
+		&PendingQuestion{QuestionID: "q", Question: "wide?", Options: []string{strings.Repeat("語", 120), strings.Repeat("x", 300)}, Kind: "question"},
+	)
+
+	for _, q := range kinds {
+		for _, w := range []int{60, 80, 100, 200} {
+			for _, h := range []int{8, 9, 10, 12, 16, 24, 40, 100} {
+				for _, idx := range []int{0, len(q.Options) / 2, len(q.Options) - 1} {
+					m := initialModel(&billyClient{sessionID: "tui-1"})
+					sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+					m = sized.(model)
+					m.pendingQuestion = q
+					m.questionPickerMode = true
+					m.questionPickerIdx = idx
+
+					fits, _, _ := m.questionOverlayPlan()
+					out := m.View()
+					if !fits {
+						if strings.Contains(out, questionPickerTitle) {
+							t.Fatalf("%dx%d kind=%s: overlay drawn although the plan refused it", w, h, q.Kind)
+						}
+						continue
+					}
+					if rows := strings.Count(out, "\n") + 1; rows > h {
+						t.Fatalf("%dx%d kind=%s idx=%d: %d rows rendered\n%s", w, h, q.Kind, idx, rows, out)
+					}
+					for _, line := range strings.Split(out, "\n") {
+						if cells := lipgloss.Width(line); cells > w {
+							t.Fatalf("%dx%d kind=%s idx=%d: a line is %d cells wide\n%s", w, h, q.Kind, idx, cells, out)
+						}
+					}
+					// The two things the operator must always be able to see.
+					if !strings.Contains(out, questionPickerTitle) || !strings.Contains(out, "esc close") {
+						t.Fatalf("%dx%d kind=%s idx=%d: the title or the key line was pushed off\n%s", w, h, q.Kind, idx, out)
+					}
+					// And the option they are about to choose.
+					if !strings.Contains(out, fmt.Sprintf("%d. ", idx+1)) {
+						t.Fatalf("%dx%d kind=%s idx=%d: the selected option is not on screen\n%s", w, h, q.Kind, idx, out)
+					}
 				}
-				if end-start > or {
-					t.Fatalf("window [%d,%d) exceeds %d rows", start, end, or)
+			}
+		}
+	}
+}
+
+// The window always keeps the selection visible and never lies about how many
+// options are hidden.
+func TestQuestionOptionWindow(t *testing.T) {
+	for _, total := range []int{2, 4, 5, 40, 400} {
+		for _, visible := range []int{1, 3, 13, 40} {
+			for _, idx := range []int{0, total / 2, total - 1} {
+				start, end := questionOptionWindow(idx, total, visible)
+				if idx < start || idx >= end {
+					t.Fatalf("window [%d,%d) of %d hides the selection %d", start, end, total, idx)
+				}
+				if end-start > visible {
+					t.Fatalf("window [%d,%d) exceeds %d rows", start, end, visible)
+				}
+				if start+(end-start)+(total-end) != total {
+					t.Fatalf("the hidden counts do not add up for [%d,%d) of %d", start, end, total)
 				}
 			}
 		}
@@ -573,23 +639,53 @@ func TestQuestionOverlayRowsAndWindow(t *testing.T) {
 	if start, end := questionOptionWindow(0, 0, 4); start != 0 || end != 0 {
 		t.Fatalf("an empty list must window to nothing, got [%d,%d)", start, end)
 	}
+	if start, end := questionOptionWindow(0, 4, 0); start != 0 || end != 0 {
+		t.Fatalf("no rows must window to nothing, got [%d,%d)", start, end)
+	}
 }
 
 // clampQuestionLines keeps what fits and marks a cut.
 func TestClampQuestionLines(t *testing.T) {
 	lines := []string{"a", "b", "c", "d"}
-	if got := clampQuestionLines(lines, 10); len(got) != 4 {
+	if got := clampQuestionLines(lines, 10, 40); len(got) != 4 {
 		t.Fatalf("nothing to clamp, got %q", got)
 	}
-	got := clampQuestionLines(lines, 2)
+	got := clampQuestionLines(lines, 2, 40)
 	if len(got) != 2 || !strings.HasSuffix(got[1], "…") {
 		t.Fatalf("clamped = %q, want 2 lines ending in an ellipsis", got)
 	}
 	if lines[1] != "b" {
 		t.Fatalf("clamping must not mutate the input: %q", lines)
 	}
-	if got := clampQuestionLines(lines, 0); len(got) != 1 {
+	if got := clampQuestionLines(lines, 0, 40); len(got) != 1 {
 		t.Fatalf("a zero budget must still show one line, got %q", got)
+	}
+	// The marked line is re-bounded: lipgloss has already padded it to the full
+	// wrap width, so appending blind made the box wider than the terminal.
+	padded := []string{strings.Repeat("x", 40), "second"}
+	if got := clampQuestionLines(padded, 1, 40); lipgloss.Width(got[0]) > 40 {
+		t.Fatalf("clamped line is %d cells, want ≤ 40: %q", lipgloss.Width(got[0]), got[0])
+	}
+}
+
+// truncateCells bounds by DISPLAY CELLS, not runes: a wide-character label is
+// twice as wide as its rune count.
+func TestTruncateCells(t *testing.T) {
+	if got := truncateCells("short", 40); got != "short" {
+		t.Fatalf("nothing to truncate, got %q", got)
+	}
+	for _, s := range []string{
+		strings.Repeat("x", 400),
+		strings.Repeat("語", 200),
+		strings.Repeat("🙂", 100),
+		strings.Repeat("é", 200),
+	} {
+		for _, max := range []int{1, 2, 24, 72} {
+			got := truncateCells(s, max)
+			if w := lipgloss.Width(got); w > max {
+				t.Fatalf("truncateCells(%d cells, max %d) = %d cells", lipgloss.Width(s), max, w)
+			}
+		}
 	}
 }
 
@@ -598,6 +694,11 @@ func TestClampQuestionLines(t *testing.T) {
 func TestSanitizeQuestionDisplay(t *testing.T) {
 	if got := sanitizeQuestionDisplay("a\x1bb\nc\td\x7fe"); got != "a b c d e" {
 		t.Fatalf("sanitized = %q", got)
+	}
+	// Bidirectional overrides can make a label read as something other than the
+	// bytes a choice sends, so they are made inert too.
+	if got := sanitizeQuestionDisplay("Allow\u202eonce\u2066"); got != "Allow once " {
+		t.Fatalf("bidi overrides survived: %q", got)
 	}
 	for _, keep := range []string{"Allow once", "Don't allow", "notes/today.md", "qwen3.5:9b", "café — ok"} {
 		if got := sanitizeQuestionDisplay(keep); got != keep {

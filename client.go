@@ -215,10 +215,16 @@ func decodePendingQuestion(raw json.RawMessage) *PendingQuestion {
 
 // doAsk performs a blocking (non-streaming) turn against /ask using the pooled
 // client. Used as the fallback when /ask/stream is unavailable.
-func (c *billyClient) doAsk(prompt string) (askResult, error) {
+// The session is a PARAMETER, not read off the client at request time: a turn
+// belongs to one session end to end, and the question the reply carries is
+// stamped with that same session. Reading c.sessionID here instead let the
+// blocking fallback go out on a session the turn had not started on, after a
+// ':session new' typed in the window between the stream failing and the
+// fallback running (self-review wave 2).
+func (c *billyClient) doAsk(prompt, sessionID string) (askResult, error) {
 	body, _ := json.Marshal(map[string]string{
 		"prompt":     prompt,
-		"session_id": c.sessionID,
+		"session_id": sessionID,
 	})
 	resp, err := c.http.Post(c.baseURL+"/ask", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -248,9 +254,9 @@ func (c *billyClient) doAsk(prompt string) (askResult, error) {
 	}, nil
 }
 
-func ask(c *billyClient, prompt string, gen int) tea.Cmd {
+func ask(c *billyClient, prompt, sessionID string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		res, err := c.doAsk(prompt)
+		res, err := c.doAsk(prompt, sessionID)
 		if err != nil {
 			if errors.Is(err, errTurnInProgress) {
 				return turnInProgressMsg{Gen: gen}
@@ -261,20 +267,20 @@ func ask(c *billyClient, prompt string, gen int) tea.Cmd {
 	}
 }
 
-func askStream(ctx context.Context, c *billyClient, prompt string, gen int) tea.Cmd {
+func askStream(ctx context.Context, c *billyClient, prompt, sessionID string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		events, err := c.openAskStream(ctx, prompt)
+		events, err := c.openAskStream(ctx, prompt, sessionID)
 		if err != nil {
-			return StreamErrMsg{Prompt: prompt, Err: err, Gen: gen}
+			return StreamErrMsg{Prompt: prompt, Session: sessionID, Err: err, Gen: gen}
 		}
-		return nextStreamMessage(events, prompt, gen)
+		return nextStreamMessage(events, prompt, sessionID, gen)
 	}
 }
 
-func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan streamEvent, error) {
+func (c *billyClient) openAskStream(ctx context.Context, prompt, sessionID string) (<-chan streamEvent, error) {
 	body, _ := json.Marshal(map[string]string{
 		"prompt":     prompt,
-		"session_id": c.sessionID,
+		"session_id": sessionID,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/ask/stream", bytes.NewReader(body))
 	if err != nil {
@@ -368,18 +374,18 @@ func (c *billyClient) openAskStream(ctx context.Context, prompt string) (<-chan 
 	return events, nil
 }
 
-func nextStreamMessage(events <-chan streamEvent, prompt string, gen int) tea.Msg {
+func nextStreamMessage(events <-chan streamEvent, prompt, sessionID string, gen int) tea.Msg {
 	event, ok := <-events
 	if !ok {
 		return StreamDoneMsg{FullText: "", Gen: gen}
 	}
 	if event.Err != nil {
-		return StreamErrMsg{Prompt: prompt, Err: event.Err, Gen: gen}
+		return StreamErrMsg{Prompt: prompt, Session: sessionID, Err: event.Err, Gen: gen}
 	}
 	if event.Done {
 		return StreamDoneMsg{FullText: event.FullText, Brain: event.Brain, Approval: event.Approval, Question: event.Question, Gen: gen}
 	}
-	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, Gen: gen, events: events}
+	return StreamChunkMsg{Chunk: event.Chunk, Prompt: prompt, Session: sessionID, Gen: gen, events: events}
 }
 
 // ── sidebar data types (mirror billy-runtime response models) ────────────────

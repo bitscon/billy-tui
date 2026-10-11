@@ -58,7 +58,7 @@ func TestDoAskSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := newBillyClient(srv.URL).doAsk("hi")
+	res, err := newBillyClient(srv.URL).doAsk("hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestDoAskBrainApproval(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := newBillyClient(srv.URL).doAsk("restart nginx")
+	res, err := newBillyClient(srv.URL).doAsk("restart nginx", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestDoAskTurnInProgress(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newBillyClient(srv.URL).doAsk("hello")
+	_, err := newBillyClient(srv.URL).doAsk("hello", "tui-test")
 	if !errors.Is(err, errTurnInProgress) {
 		t.Fatalf("expected errTurnInProgress, got %v", err)
 	}
@@ -147,7 +147,7 @@ func TestDoAskOtherErrorUnchanged(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newBillyClient(srv.URL).doAsk("hello")
+	_, err := newBillyClient(srv.URL).doAsk("hello", "tui-test")
 	if err == nil || errors.Is(err, errTurnInProgress) {
 		t.Fatalf("expected a plain non-409 error, got %v", err)
 	}
@@ -199,7 +199,7 @@ func TestOpenAskStreamHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected open error: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestOpenAskStreamBrainOnDoneFrame(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected open error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestOpenAskStreamBrainOnEarlyFrame(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected open error: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestOpenAskStreamLegacyNilBrain(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected open error: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestOpenAskStreamLongReply(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected open error: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestOpenAskStreamMalformedChunk(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	ch, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected open error: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestOpenAskStreamTurnInProgress(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hello")
+	_, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hello", "tui-test")
 	if !errors.Is(err, errTurnInProgress) {
 		t.Fatalf("expected errTurnInProgress from stream, got %v", err)
 	}
@@ -376,7 +376,7 @@ func TestOpenAskStreamOtherError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hello")
+	_, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hello", "tui-test")
 	if err == nil || errors.Is(err, errTurnInProgress) {
 		t.Fatalf("expected a plain non-409 error, got %v", err)
 	}
@@ -476,7 +476,7 @@ func TestUnixSocketTransportEndToEnd(t *testing.T) {
 		t.Fatalf("Health over socket: %v", err)
 	}
 
-	res, err := c.doAsk("hi")
+	res, err := c.doAsk("hi", "tui-test")
 	if err != nil {
 		t.Fatalf("doAsk over socket: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestUnixSocketTransportEndToEnd(t *testing.T) {
 		t.Fatalf("doAsk over socket = %q, want %q", res.Message, "socket ok")
 	}
 
-	ch, err := c.openAskStream(context.Background(), "hi")
+	ch, err := c.openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("openAskStream over socket: %v", err)
 	}
@@ -735,7 +735,7 @@ func TestDoAskPendingQuestionPresentNullAbsent(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			res, err := newBillyClient(srv.URL).doAsk("hi")
+			res, err := newBillyClient(srv.URL).doAsk("hi", "tui-test")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -773,7 +773,7 @@ func TestDoAskPermissionQuestionToolAndTarget(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res, err := newBillyClient(srv.URL).doAsk("hi")
+	res, err := newBillyClient(srv.URL).doAsk("hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -804,7 +804,7 @@ func TestDoAskMalformedPendingQuestionKeepsTheReply(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			res, err := newBillyClient(srv.URL).doAsk("hi")
+			res, err := newBillyClient(srv.URL).doAsk("hi", "tui-test")
 			if err != nil {
 				t.Fatalf("a malformed question must not fail the reply: %v", err)
 			}
@@ -842,7 +842,7 @@ func TestOpenAskStreamPendingQuestionOnItsOwnFrame(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -874,7 +874,7 @@ func TestOpenAskStreamMalformedQuestionDoesNotKillTheTurn(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -908,7 +908,7 @@ func TestOpenAskStreamLegacyNilQuestion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi")
+	events, err := newBillyClient(srv.URL).openAskStream(context.Background(), "hi", "tui-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -916,5 +916,45 @@ func TestOpenAskStreamLegacyNilQuestion(t *testing.T) {
 		if ev.Done && ev.Question != nil {
 			t.Fatalf("legacy stream must decode nil question, got %+v", ev.Question)
 		}
+	}
+}
+
+// The session a request carries is the one PASSED IN, not whatever the client
+// field holds when the request runs. A turn belongs to one session end to end,
+// and the question the reply carries is stamped with that same session.
+func TestRequestsCarryThePassedSession(t *testing.T) {
+	var gotAsk, gotStream string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SessionID string `json:"session_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if strings.HasSuffix(r.URL.Path, "/stream") {
+			gotStream = body.SessionID
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"chunk\":\"ok\",\"done\":true}\n\n")
+			return
+		}
+		gotAsk = body.SessionID
+		_, _ = io.WriteString(w, `{"message":"ok"}`)
+	}))
+	defer srv.Close()
+
+	c := newBillyClient(srv.URL)
+	c.sessionID = "tui-new" // ':session new' has already moved the client on
+	if _, err := c.doAsk("hi", "tui-old"); err != nil {
+		t.Fatalf("doAsk: %v", err)
+	}
+	if gotAsk != "tui-old" {
+		t.Fatalf("/ask carried session %q, want %q", gotAsk, "tui-old")
+	}
+	events, err := c.openAskStream(context.Background(), "hi", "tui-old")
+	if err != nil {
+		t.Fatalf("openAskStream: %v", err)
+	}
+	for range events {
+	}
+	if gotStream != "tui-old" {
+		t.Fatalf("/ask/stream carried session %q, want %q", gotStream, "tui-old")
 	}
 }

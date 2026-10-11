@@ -17,9 +17,9 @@ import (
 
 type sidebarTickMsg struct{}
 
-func waitForStream(events <-chan streamEvent, prompt string, gen int) tea.Cmd {
+func waitForStream(events <-chan streamEvent, prompt, sessionID string, gen int) tea.Cmd {
 	return func() tea.Msg {
-		return nextStreamMessage(events, prompt, gen)
+		return nextStreamMessage(events, prompt, sessionID, gen)
 	}
 }
 
@@ -255,7 +255,7 @@ func (m *model) submitPrompt(text string) tea.Cmd {
 	m.requestStarted = time.Now()
 	m.liveMsg = ""
 	m.updateChatViewport()
-	return askStream(ctx, m.client, text, gen)
+	return askStream(ctx, m.client, text, m.turnSession, gen)
 }
 
 // desiredInputRows returns how many rows the input box should occupy: it grows
@@ -970,7 +970,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isStreaming = true
 		m.thinking = false
 		m.updateChatViewport()
-		return m, waitForStream(msg.events, msg.Prompt, msg.Gen)
+		return m, waitForStream(msg.events, msg.Prompt, msg.Session, msg.Gen)
 
 	case StreamDoneMsg:
 		if msg.Gen != m.streamGen {
@@ -1053,7 +1053,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// to the blocking /ask path, keeping the same generation so its result
 		// stays current. If the turn HAD started, the fallback's 409 is
 		// absorbed by the benign turn-in-progress handler above.
-		return m, ask(m.client, msg.Prompt, msg.Gen)
+		// The fallback reuses the session THIS TURN started on, so the retry and
+		// the question stamp cannot disagree.
+		return m, ask(m.client, msg.Prompt, msg.Session, msg.Gen)
 
 	// ── 409 turn-in-progress (non-streaming path) ─────────────────────────────
 	case turnInProgressMsg:
@@ -1258,10 +1260,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// ── pending-question picker: navigate / choose / close (contract v3 §15) ──
 		// A picker the operator CANNOT SEE must not own the keyboard (self-review
-		// finding): below the two-pane layout's floor, View() draws only the
-		// resize notice, so enter would have sent a consent answer chosen off a
-		// screen that never showed the question.
-		if m.questionPickerMode && m.pendingQuestion != nil && m.paneLayoutFits() {
+		// finding, refined in wave 2): the ONE predicate View() renders under is
+		// what gates the keys, so the screen and the keyboard can never disagree.
+		// On a terminal too short to draw the overlay whole the client degrades to
+		// today's behaviour — the numbered list in the reply text, answered from
+		// the input box.
+		if fits, _, optionRows := m.questionOverlayPlan(); fits {
 			key := msg.String()
 			switch key {
 			case "up", "k":
@@ -1281,11 +1285,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// number or the option itself.
 				m.questionPickerMode = false
 			default:
-				// The number keys choose directly. Bounded by the option count,
-				// so a key beyond the list does nothing at all rather than
-				// landing on some other option.
+				// The number keys choose directly — but only an option that is
+				// actually ON SCREEN. A key beyond the list, or one naming an
+				// option the window has scrolled away, does nothing at all
+				// rather than answering with a label the operator never saw.
 				if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-					if idx := int(key[0] - '1'); idx < questionNumberKeys(m.pendingQuestion) {
+					idx := int(key[0] - '1')
+					start, end := questionOptionWindow(m.questionPickerIdx, len(m.pendingQuestion.Options), optionRows)
+					if idx < questionNumberKeys(m.pendingQuestion) && idx >= start && idx < end {
 						m.questionPickerIdx = idx
 						return m, m.chooseQuestionOption(idx)
 					}

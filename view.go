@@ -313,33 +313,39 @@ func (m model) View() string {
 	}
 
 	// ── pending-question picker overlay (contract v3 §14/§15) ─────────────────
-	if m.questionPickerMode && m.pendingQuestion != nil {
+	// Offered ONLY when it can be drawn whole: below that the client degrades to
+	// exactly today's behaviour — the reply text behind it carries the question
+	// and its numbered list, and the input box answers it. questionPickerActive
+	// is the one predicate, shared with the key handler, so the screen and the
+	// keyboard can never disagree about whether a picker is on offer.
+	if fits, questionRows, optionRows := m.questionOverlayPlan(); fits {
 		q := m.pendingQuestion
 		width := questionWrapWidth(m.width)
 		wrap := lipgloss.NewStyle().Width(width)
-		questionRows, optionRows := questionOverlayRows(m.height, len(q.Options))
+		start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), optionRows)
 
 		var b strings.Builder
 		b.WriteString(SectionHeaderStyle.Render(questionPickerTitle) + "\n")
-		b.WriteString(DimStyle.Render(questionPickerHint(q)) + "\n\n")
+		b.WriteString(DimStyle.Render(truncateCells(
+			questionPickerHint(q, start == 0 && end == len(q.Options)), width)) + "\n\n")
 		// The question in the brain's OWN words, and the labels in the order and
-		// with the numbers the runtime matches — never re-worded, re-ordered or
+		// under the numbers the runtime matches — never re-worded, re-ordered or
 		// renumbered (contract v3 §15 rule 5). Control characters are made inert
-		// for display only; what a choice SENDS is always the bytes the runtime
-		// sent. The rows are bounded so a very long question or option list
-		// cannot push the options, or the key line, off the screen.
+		// for display only; a choice always sends the bytes the runtime sent.
 		qLines := strings.Split(wrap.Render(sanitizeQuestionDisplay(q.Question)), "\n")
-		b.WriteString(strings.Join(clampQuestionLines(qLines, questionRows), "\n") + "\n")
+		b.WriteString(strings.Join(clampQuestionLines(qLines, questionRows, width), "\n") + "\n")
 		if subject := questionSubjectLine(q); subject != "" {
-			b.WriteString(DimStyle.Render(truncate(sanitizeQuestionDisplay(subject), width)) + "\n")
+			b.WriteString(DimStyle.Render(truncateCells(sanitizeQuestionDisplay(subject), width)) + "\n")
 		}
 		b.WriteString("\n")
-		start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), optionRows)
 		if start > 0 {
 			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
 		}
 		for i := start; i < end; i++ {
-			line := truncate(fmt.Sprintf("%d. %s", i+1, sanitizeQuestionDisplay(q.Options[i])), width)
+			// width-2: every option row carries a two-cell prefix ("▸ " or two
+			// spaces), which is outside the wrap width, so the line itself gets
+			// two cells less or the box grows wider than the terminal.
+			line := truncateCells(fmt.Sprintf("%d. %s", i+1, sanitizeQuestionDisplay(q.Options[i])), width-2)
 			if i == m.questionPickerIdx {
 				b.WriteString(UserInputStyle.Render("▸ "+line) + "\n")
 			} else {
@@ -413,9 +419,14 @@ var DimStyle = lipgloss.NewStyle().Foreground(colorSubtle)
 // every kind of question, and the question's own words say what it is about.
 const questionPickerTitle = "Billy needs an answer"
 
+// questionMinOptionRows is the fewest option rows worth drawing. A list longer
+// than this is windowed rather than refused, so a long list does not cost the
+// operator the picker.
+const questionMinOptionRows = 3
+
 // questionWrapWidth bounds the wrap width of the question text inside the
 // overlay so a long sentence does not run off a wide terminal or overflow a
-// narrow one.
+// narrow one. The overlay's own padding then keeps the box inside the terminal.
 func questionWrapWidth(termWidth int) int {
 	w := termWidth - 8
 	if w > 72 {
@@ -427,10 +438,12 @@ func questionWrapWidth(termWidth int) int {
 	return w
 }
 
-// questionPickerHint is the key line under the title.
-func questionPickerHint(q *PendingQuestion) string {
+// questionPickerHint is the key line under the title. The number keys are
+// offered only when the WHOLE list is on screen: with a windowed list a number
+// would name an option the operator cannot see.
+func questionPickerHint(q *PendingQuestion, allVisible bool) string {
 	keys := "↑/↓ move · enter choose"
-	if n := questionNumberKeys(q); n > 1 {
+	if n := questionNumberKeys(q); n > 1 && allVisible {
 		keys = fmt.Sprintf("↑/↓ move · 1–%d choose · enter choose", n)
 	}
 	return keys + " · esc close (nothing sent)"
@@ -465,53 +478,117 @@ func questionPickerNote(q *PendingQuestion) string {
 }
 
 // sanitizeQuestionDisplay makes a question or an option label safe to put on a
-// terminal: every control character becomes a single space.
+// terminal: every control character, and every bidirectional override, becomes a
+// single space.
 //
 // A DISPLAY transform only — what a choice SENDS is always the bytes the runtime
-// sent (answerForOption), so the answer still matches the runtime's own option
-// list exactly. Two self-review findings close here: a question carrying CSI
-// sequences could repaint the consent screen (the runtime's egress guards
-// neutralise tool markup and persona claims, not C0/C1 controls), and a newline
-// inside a label rendered a second, fake numbered line under a real one — so the
-// list the operator reads could be spoofed. A control character is not text the
-// operator can read, so making it inert is not a re-wording of the brain's words
-// (contract v3 §15 rule 5).
+// sent (answerForOption), so a fenced kind's answer still matches the runtime's
+// own stored label exactly. Three self-review findings close here: a question
+// carrying CSI sequences could repaint the screen the operator is consenting on
+// (the runtime's egress guards neutralise tool markup and persona claims, not
+// C0/C1 controls); a newline inside a label rendered a second, forged numbered
+// line under a real one; and a bidi override could make a label read as
+// something other than the bytes a choice sends. None of these is text the
+// operator can read, so making them inert is not a re-wording of the brain's
+// words (contract v3 §15 rule 5).
 func sanitizeQuestionDisplay(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		switch {
+		case r < 0x20 || r == 0x7f, r >= 0x80 && r <= 0x9f:
 			b.WriteRune(' ')
-			continue
+		case r == 0x200e || r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+			b.WriteRune(' ')
+		default:
+			b.WriteRune(r)
 		}
-		b.WriteRune(r)
 	}
 	return b.String()
 }
 
-// questionOverlayRows splits the rows the overlay may use between the question
-// block and the option list. The options win the contest when space is tight:
-// they are the actionable part, and a question the operator can only half-read
-// is still answerable from the reply text behind the overlay.
-func questionOverlayRows(termHeight, options int) (questionRows, optionRows int) {
-	// Chrome inside the overlay: title, key line, blank, blank before the
-	// options, the two "N more" rows, a note row, and the overlay border (2).
-	avail := termHeight - 9
-	if avail < 4 {
-		avail = 4
+// truncateCells trims s to at most max DISPLAY CELLS, marking a cut with an
+// ellipsis. Cells, not runes: a label of wide characters is twice as wide as its
+// rune count, and bounding by runes let a CJK label render a box wider than the
+// terminal (self-review wave 2).
+func truncateCells(s string, max int) string {
+	if max < 1 || lipgloss.Width(s) <= max {
+		return s
 	}
-	optionRows = options
-	if optionRows > avail-2 {
-		optionRows = avail - 2
+	r := []rune(s)
+	if len(r) > max {
+		r = r[:max] // one cell per rune at minimum, so this can only help
 	}
-	if optionRows < 1 {
-		optionRows = 1
+	for len(r) > 0 {
+		candidate := string(r) + "…"
+		if lipgloss.Width(candidate) <= max {
+			return candidate
+		}
+		r = r[:len(r)-1]
 	}
-	questionRows = avail - optionRows
+	return "…"
+}
+
+// questionOverlayChrome counts the rows the overlay spends on everything that is
+// NOT the question text or the option list, for this question on this terminal:
+// the style's border and padding, the title, the key line, the blank under it,
+// the blank above the options, a subject line where there is one, and the note
+// (a blank plus its wrapped lines) where there is one.
+//
+// Computed from what will actually be written, never from a constant: a constant
+// under-counted the padding, the subject and the wrapped note by three to five
+// rows, and the overflow came off the TOP of the screen — taking the title and
+// the key line with it (self-review wave 2).
+func (m model) questionOverlayChrome(q *PendingQuestion) int {
+	rows := HelpOverlayStyle.GetVerticalFrameSize()
+	rows += 1 // the title
+	rows += 1 // the key line, truncated to one row on render
+	rows += 2 // the blank under the key line, the blank above the options
+	if questionSubjectLine(q) != "" {
+		rows++
+	}
+	if note := questionPickerNote(q); note != "" {
+		rendered := lipgloss.NewStyle().Width(questionWrapWidth(m.width)).Render(note)
+		rows += 1 + strings.Count(rendered, "\n") + 1
+	}
+	return rows
+}
+
+// questionOverlayPlan decides whether the picker can be drawn whole on this
+// terminal and, if so, how many rows the question text and the option list each
+// get. fits=false means no overlay and no keys: a choice the operator cannot see
+// is not a choice (contract v3 §15 rule 6), and the client degrades to the
+// numbered list in the reply text.
+func (m model) questionOverlayPlan() (fits bool, questionRows, optionRows int) {
+	q := m.pendingQuestion
+	if q == nil || !m.questionPickerMode || !m.paneLayoutFits() {
+		return false, 0, 0
+	}
+	chrome := m.questionOverlayChrome(q)
+	// A windowed list costs two "N more" rows at worst; reserved up front so the
+	// budget holds whichever way the window lands.
+	moreRows := 0
+	if len(q.Options) > questionMinOptionRows {
+		moreRows = 2
+	}
+	minOptions := len(q.Options)
+	if minOptions > questionMinOptionRows {
+		minOptions = questionMinOptionRows
+	}
+	// One row for the question, plus the fewest options worth showing.
+	if m.height < chrome+1+minOptions+moreRows {
+		return false, 0, 0
+	}
+	budget := m.height - chrome - moreRows
+	optionRows = len(q.Options)
+	if optionRows > budget-1 {
+		optionRows = budget - 1
+	}
+	questionRows = budget - optionRows
 	if questionRows < 1 {
 		questionRows = 1
 	}
-	return questionRows, optionRows
+	return true, questionRows, optionRows
 }
 
 // questionOptionWindow returns the [start,end) slice of options to render, sized
@@ -535,8 +612,10 @@ func questionOptionWindow(idx, total, visible int) (start, end int) {
 }
 
 // clampQuestionLines keeps at most max rendered lines of the question, marking a
-// cut with an ellipsis so the operator can see the text was shortened.
-func clampQuestionLines(lines []string, max int) []string {
+// cut with an ellipsis. The marked line is re-bounded to width: lipgloss has
+// already padded it to the full wrap width, so appending to it blind made the
+// box two columns wider than the terminal (self-review wave 2).
+func clampQuestionLines(lines []string, max, width int) []string {
 	if max < 1 {
 		max = 1
 	}
@@ -544,6 +623,6 @@ func clampQuestionLines(lines []string, max int) []string {
 		return lines
 	}
 	out := append([]string(nil), lines[:max]...)
-	out[max-1] += " …"
+	out[max-1] = truncateCells(strings.TrimRight(out[max-1], " ")+" …", width)
 	return out
 }
