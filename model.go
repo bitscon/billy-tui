@@ -78,6 +78,11 @@ type model struct {
 	questionPickerMode bool
 	questionPickerIdx  int
 	questionSession    string
+	// turnSession is the session the CURRENT turn was submitted on, frozen at
+	// submit. A question is stamped with this rather than with whatever session
+	// the client holds when the reply lands, so ':session new' typed while Billy
+	// is still working cannot make an old question look current.
+	turnSession string
 
 	// brain-floor screen (':brains' command, Modernization 5). floors stays nil
 	// while loading and on a runtime without the surface — the screen is then
@@ -265,6 +270,15 @@ type StreamErrMsg struct {
 	Gen    int
 }
 
+// sessionIDOf is the client's session id, or "" when there is no client (the
+// tests build one that way).
+func sessionIDOf(c *billyClient) string {
+	if c == nil {
+		return ""
+	}
+	return c.sessionID
+}
+
 // --- constructors ---
 
 func newMdRenderer(width int) *glamour.TermRenderer {
@@ -320,6 +334,7 @@ func initialModel(client *billyClient) model {
 		client:       client,
 		historyIdx:   -1,
 		focusedPane:  paneInput,
+		turnSession:  sessionIDOf(client),
 		mdRenderer:   newMdRenderer(80),
 	}
 }

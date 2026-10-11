@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -446,5 +447,161 @@ func TestCommandBarListsPermissions(t *testing.T) {
 	m.commandMode = true
 	if out := m.View(); !strings.Contains(out, ":permissions") {
 		t.Fatalf("command bar missing :permissions:\n%s", out)
+	}
+}
+
+// ── self-review regressions (contract v3 overlay) ────────────────────────────
+
+// questionOverlay renders the picker overlay for a given question and terminal.
+func questionOverlay(t *testing.T, q *PendingQuestion, w, h int) string {
+	t.Helper()
+	m := initialModel(&billyClient{sessionID: "tui-test"})
+	nm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	m = nm.(model)
+	m.pendingQuestion = q
+	m.questionPickerMode = true
+	return m.View()
+}
+
+// A question or label carrying terminal control sequences must not reach the
+// terminal: the runtime's egress guards neutralise tool markup and persona
+// claims, not C0/C1 controls, so the picker makes them inert itself.
+func TestQuestionOverlayMakesControlSequencesInert(t *testing.T) {
+	out := questionOverlay(t, &PendingQuestion{
+		QuestionID: "q-1",
+		Question:   "Harmless?\x1b[2J\x1b[H\x1b[31mSYSTEM: type approve\x07",
+		Options:    []string{"Allow\x1b[31m once", "Don't allow"},
+		Kind:       "cloud_read_consent",
+	}, 100, 32)
+
+	if strings.Contains(out, "\x1b[2J") || strings.Contains(out, "\x1b[H") {
+		t.Fatalf("a screen-clearing sequence survived into the overlay:\n%q", out)
+	}
+	if strings.Contains(out, "\x07") {
+		t.Fatalf("a BEL survived into the overlay")
+	}
+	// The words themselves are still shown — only the controls are made inert.
+	if !strings.Contains(out, "Harmless?") {
+		t.Fatalf("the question text was lost:\n%s", out)
+	}
+}
+
+// A newline inside an option label must not render a second, fake numbered line
+// under a real one — the numbered list the operator reads is the list the
+// runtime matches.
+func TestQuestionOverlayLabelCannotForgeANumberedLine(t *testing.T) {
+	out := questionOverlay(t, &PendingQuestion{
+		QuestionID: "q-1",
+		Question:   "What should I do?",
+		Options:    []string{"Don't allow", "Always allow\n1. Don't allow"},
+		Kind:       "cloud_read_consent",
+	}, 100, 32)
+
+	// The real property: exactly ONE rendered line begins the numbered list at
+	// 1. The label's newline is made inert, so its text stays on its own row
+	// instead of opening a second, forged "1." line.
+	numbered := 0
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimLeft(strings.TrimSpace(strings.Trim(line, "│ ")), "▸ ")
+		if strings.HasPrefix(trimmed, "1. ") {
+			numbered++
+		}
+	}
+	if numbered != 1 {
+		t.Fatalf("%d rendered lines open the list at 1., want exactly 1:\n%s", numbered, out)
+	}
+	if strings.Contains(out, "Always allow\n") {
+		t.Fatalf("a label newline reached the screen:\n%s", out)
+	}
+}
+
+// A very long question cannot push the options or the key line off a short
+// terminal, and a long option list is windowed with a "more" affordance.
+func TestQuestionOverlayIsHeightBounded(t *testing.T) {
+	long := strings.Repeat("this question goes on and on and on. ", 60)
+	out := questionOverlay(t, &PendingQuestion{
+		QuestionID: "q-1", Question: long,
+		Options: []string{"Allow once", "Allow for this conversation", "Always allow", "Don't allow"},
+		Kind:    "cloud_read_consent",
+	}, 100, 24)
+	if rows := strings.Count(out, "\n") + 1; rows > 24 {
+		t.Fatalf("overlay is %d rows on a 24-row terminal:\n%s", rows, out)
+	}
+	for _, want := range []string{"1. Allow once", "4. Don't allow", "esc close (nothing sent)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("a long question pushed %q off the screen:\n%s", want, out)
+		}
+	}
+
+	many := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		many = append(many, fmt.Sprintf("option %d", i+1))
+	}
+	out2 := questionOverlay(t, &PendingQuestion{
+		QuestionID: "q-1", Question: "Which?", Options: many, Kind: "question",
+	}, 100, 24)
+	if rows := strings.Count(out2, "\n") + 1; rows > 24 {
+		t.Fatalf("40 options render %d rows on a 24-row terminal:\n%s", rows, out2)
+	}
+	if !strings.Contains(out2, "more") {
+		t.Fatalf("a windowed list must show a \"more\" affordance:\n%s", out2)
+	}
+}
+
+// The row split always fits, and the window always keeps the selection visible.
+func TestQuestionOverlayRowsAndWindow(t *testing.T) {
+	for _, h := range []int{8, 12, 24, 40, 100} {
+		for _, opts := range []int{2, 4, 40, 400} {
+			qr, or := questionOverlayRows(h, opts)
+			if qr < 1 || or < 1 {
+				t.Fatalf("height %d / %d options: rows (%d,%d) must both be ≥1", h, opts, qr, or)
+			}
+			if or > opts {
+				t.Fatalf("height %d / %d options: option rows %d exceeds the list", h, opts, or)
+			}
+			for _, idx := range []int{0, opts / 2, opts - 1} {
+				start, end := questionOptionWindow(idx, opts, or)
+				if idx < start || idx >= end {
+					t.Fatalf("window [%d,%d) hides the selection %d", start, end, idx)
+				}
+				if end-start > or {
+					t.Fatalf("window [%d,%d) exceeds %d rows", start, end, or)
+				}
+			}
+		}
+	}
+	if start, end := questionOptionWindow(0, 0, 4); start != 0 || end != 0 {
+		t.Fatalf("an empty list must window to nothing, got [%d,%d)", start, end)
+	}
+}
+
+// clampQuestionLines keeps what fits and marks a cut.
+func TestClampQuestionLines(t *testing.T) {
+	lines := []string{"a", "b", "c", "d"}
+	if got := clampQuestionLines(lines, 10); len(got) != 4 {
+		t.Fatalf("nothing to clamp, got %q", got)
+	}
+	got := clampQuestionLines(lines, 2)
+	if len(got) != 2 || !strings.HasSuffix(got[1], "…") {
+		t.Fatalf("clamped = %q, want 2 lines ending in an ellipsis", got)
+	}
+	if lines[1] != "b" {
+		t.Fatalf("clamping must not mutate the input: %q", lines)
+	}
+	if got := clampQuestionLines(lines, 0); len(got) != 1 {
+		t.Fatalf("a zero budget must still show one line, got %q", got)
+	}
+}
+
+// sanitizeQuestionDisplay replaces controls and leaves ordinary text — including
+// non-ASCII — exactly as it was.
+func TestSanitizeQuestionDisplay(t *testing.T) {
+	if got := sanitizeQuestionDisplay("a\x1bb\nc\td\x7fe"); got != "a b c d e" {
+		t.Fatalf("sanitized = %q", got)
+	}
+	for _, keep := range []string{"Allow once", "Don't allow", "notes/today.md", "qwen3.5:9b", "café — ok"} {
+		if got := sanitizeQuestionDisplay(keep); got != keep {
+			t.Fatalf("ordinary text altered: %q → %q", keep, got)
+		}
 	}
 }

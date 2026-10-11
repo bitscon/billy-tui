@@ -84,13 +84,21 @@ func statusBase(routingMode string, lastBrain *BrainReport, pinModel, pinProvide
 	return base
 }
 
+// paneLayoutFits reports whether View() is actually drawing the interface — the
+// window size has arrived and the terminal clears the two-pane layout's floor.
+// Below it only the resize notice is drawn, so an overlay must not own the
+// keyboard there: a choice the operator cannot see is not a choice.
+func (m model) paneLayoutFits() bool {
+	return m.ready && m.width >= 60 && m.height >= 8
+}
+
 func (m model) View() string {
 	if !m.ready {
 		return "Initialising…\n"
 	}
 
 	// Guard against terminals too small to lay out the two-pane UI.
-	if m.width < 60 || m.height < 8 {
+	if !m.paneLayoutFits() {
 		return lipgloss.Place(
 			m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
@@ -307,27 +315,39 @@ func (m model) View() string {
 	// ── pending-question picker overlay (contract v3 §14/§15) ─────────────────
 	if m.questionPickerMode && m.pendingQuestion != nil {
 		q := m.pendingQuestion
-		wrap := lipgloss.NewStyle().Width(questionWrapWidth(m.width))
+		width := questionWrapWidth(m.width)
+		wrap := lipgloss.NewStyle().Width(width)
+		questionRows, optionRows := questionOverlayRows(m.height, len(q.Options))
 
 		var b strings.Builder
 		b.WriteString(SectionHeaderStyle.Render(questionPickerTitle) + "\n")
 		b.WriteString(DimStyle.Render(questionPickerHint(q)) + "\n\n")
-		// The question in the brain's OWN words, and the labels as sent —
-		// verbatim, never re-worded, re-ordered or truncated (contract v3 §15
-		// rule 5). The number shown against each option IS the number the
-		// runtime matches, because the list is never filtered.
-		b.WriteString(wrap.Render(q.Question) + "\n")
+		// The question in the brain's OWN words, and the labels in the order and
+		// with the numbers the runtime matches — never re-worded, re-ordered or
+		// renumbered (contract v3 §15 rule 5). Control characters are made inert
+		// for display only; what a choice SENDS is always the bytes the runtime
+		// sent. The rows are bounded so a very long question or option list
+		// cannot push the options, or the key line, off the screen.
+		qLines := strings.Split(wrap.Render(sanitizeQuestionDisplay(q.Question)), "\n")
+		b.WriteString(strings.Join(clampQuestionLines(qLines, questionRows), "\n") + "\n")
 		if subject := questionSubjectLine(q); subject != "" {
-			b.WriteString(DimStyle.Render(wrap.Render(subject)) + "\n")
+			b.WriteString(DimStyle.Render(truncate(sanitizeQuestionDisplay(subject), width)) + "\n")
 		}
 		b.WriteString("\n")
-		for i, opt := range q.Options {
-			line := fmt.Sprintf("%d. %s", i+1, opt)
+		start, end := questionOptionWindow(m.questionPickerIdx, len(q.Options), optionRows)
+		if start > 0 {
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n")
+		}
+		for i := start; i < end; i++ {
+			line := truncate(fmt.Sprintf("%d. %s", i+1, sanitizeQuestionDisplay(q.Options[i])), width)
 			if i == m.questionPickerIdx {
 				b.WriteString(UserInputStyle.Render("▸ "+line) + "\n")
 			} else {
 				b.WriteString("  " + line + "\n")
 			}
+		}
+		if end < len(q.Options) {
+			b.WriteString(DimStyle.Render(fmt.Sprintf("  ↓ %d more", len(q.Options)-end)) + "\n")
 		}
 		if note := questionPickerNote(q); note != "" {
 			b.WriteString("\n" + DimStyle.Render(wrap.Render(note)) + "\n")
@@ -442,4 +462,88 @@ func questionPickerNote(q *PendingQuestion) string {
 	default:
 		return ""
 	}
+}
+
+// sanitizeQuestionDisplay makes a question or an option label safe to put on a
+// terminal: every control character becomes a single space.
+//
+// A DISPLAY transform only — what a choice SENDS is always the bytes the runtime
+// sent (answerForOption), so the answer still matches the runtime's own option
+// list exactly. Two self-review findings close here: a question carrying CSI
+// sequences could repaint the consent screen (the runtime's egress guards
+// neutralise tool markup and persona claims, not C0/C1 controls), and a newline
+// inside a label rendered a second, fake numbered line under a real one — so the
+// list the operator reads could be spoofed. A control character is not text the
+// operator can read, so making it inert is not a re-wording of the brain's words
+// (contract v3 §15 rule 5).
+func sanitizeQuestionDisplay(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// questionOverlayRows splits the rows the overlay may use between the question
+// block and the option list. The options win the contest when space is tight:
+// they are the actionable part, and a question the operator can only half-read
+// is still answerable from the reply text behind the overlay.
+func questionOverlayRows(termHeight, options int) (questionRows, optionRows int) {
+	// Chrome inside the overlay: title, key line, blank, blank before the
+	// options, the two "N more" rows, a note row, and the overlay border (2).
+	avail := termHeight - 9
+	if avail < 4 {
+		avail = 4
+	}
+	optionRows = options
+	if optionRows > avail-2 {
+		optionRows = avail - 2
+	}
+	if optionRows < 1 {
+		optionRows = 1
+	}
+	questionRows = avail - optionRows
+	if questionRows < 1 {
+		questionRows = 1
+	}
+	return questionRows, optionRows
+}
+
+// questionOptionWindow returns the [start,end) slice of options to render, sized
+// to the rows available and keeping the selection visible (centred where it
+// can be). Callers show a "N more" row when start>0 or end<total.
+func questionOptionWindow(idx, total, visible int) (start, end int) {
+	if total <= 0 || visible <= 0 {
+		return 0, 0
+	}
+	if visible >= total {
+		return 0, total
+	}
+	start = idx - visible/2
+	if start < 0 {
+		start = 0
+	}
+	if start > total-visible {
+		start = total - visible
+	}
+	return start, start + visible
+}
+
+// clampQuestionLines keeps at most max rendered lines of the question, marking a
+// cut with an ellipsis so the operator can see the text was shortened.
+func clampQuestionLines(lines []string, max int) []string {
+	if max < 1 {
+		max = 1
+	}
+	if len(lines) <= max {
+		return lines
+	}
+	out := append([]string(nil), lines[:max]...)
+	out[max-1] += " …"
+	return out
 }

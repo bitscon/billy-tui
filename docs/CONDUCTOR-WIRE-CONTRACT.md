@@ -431,18 +431,40 @@ text (its chunk is empty), so content parity holds.
    A fenced kind whose label is itself all digits is **ambiguous on the wire** (the
    runtime would read it as a position): the client sends nothing and puts the label
    in the input box for the operator to send.
-2. **Same session, always.** The session the question arrived on is recorded with it.
-   If the session has since changed (`:session new`), the picker sends nothing and
-   says why — the runtime would match the answer against nothing.
+2. **Same session, always.** The session recorded with a question is the session
+   **the turn ran on**, frozen when the turn was submitted — not whatever session
+   the client happens to hold when the reply lands. (`:session new` is reachable
+   while Billy is still working, so stamping from the live client would re-stamp an
+   old question as belonging to the new session.) If the session has since changed,
+   the picker sends nothing and says why — the runtime would match the answer
+   against nothing.
 3. **Esc sends nothing.** Closing the picker is not an answer. The question stays
    answerable, because the reply text still carries the numbered list and the input
    box still accepts a typed number or label.
 4. **One picker.** A newer reply replaces the open picker outright; a reply with no
    question closes it. Any submission — typed, queued or picked — closes it, so one
    choice can never be sent twice.
-5. **Verbatim.** The question and every option label are rendered exactly as received.
-   The client adds no label of its own to a choice and never re-words one.
-6. **`:permissions`** sends the literal message `/permissions` on the current
+5. **Verbatim.** The question and every option label are rendered exactly as
+   received, in the order received, under the numbers the runtime matches. The
+   client adds no label of its own to a choice, never re-words one, and never
+   filters, reorders or renumbers the list — dropping even a blank entry would
+   silently renumber every option after it.
+
+   Two bounded exceptions, both **display-only** — what a choice SENDS is always
+   the bytes the runtime sent:
+   - **Control characters are made inert.** The runtime's egress guards neutralise
+     tool markup and persona claims, not C0/C1 controls; a question carrying CSI
+     sequences could otherwise repaint the screen the operator is consenting on,
+     and a newline inside a label could forge a second numbered line under a real
+     one. A control character is not text the operator can read, so replacing it
+     with a space is not a re-wording.
+   - **The overlay is height-bounded.** A very long question is clipped with an
+     ellipsis and a long option list is windowed with a "N more" row, so the
+     options and the key line can never be pushed off the screen.
+6. **A choice the operator cannot see is not a choice.** Below the client's
+   two-pane layout floor the overlay is not drawn at all, so the picker owns no
+   keys there and nothing is sent.
+7. **`:permissions`** sends the literal message `/permissions` on the current
    session, and nothing else: the runtime's own recognizer requires it as the whole
    message. The two-step flow that follows (pick a source, then pick its setting) is
    driven entirely by the `pending_question` of each reply — the client holds no
@@ -481,4 +503,7 @@ type PendingQuestion struct {
 | new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
 | question armed, session changed since | object | picker sends nothing and says the session changed |
+| question armed, turn still in flight | object | picker sends nothing and says Billy is still working |
+| question armed, terminal below the layout floor | object | overlay is not drawn, picker owns no keys, nothing sent |
+| question armed, text or label carries control characters | object | the controls are made inert on screen; a choice still sends the bytes as received |
 | new runtime, old client | ignored | today's behavior (unknown fields dropped) |

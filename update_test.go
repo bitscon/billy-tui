@@ -807,6 +807,21 @@ func testConsentQuestion() *PendingQuestion {
 	}
 }
 
+// questionModel builds a model the way the real client reaches the picker: a
+// sized terminal — the overlay must be drawable before it owns the keyboard —
+// and a question armed on the session the turn ran on.
+func questionModel(t *testing.T, q *PendingQuestion) model {
+	t.Helper()
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = next.(model)
+	m.pendingQuestion = q
+	m.questionSession = "tui-1"
+	m.turnSession = "tui-1"
+	m.questionPickerMode = true
+	return m
+}
+
 // A reply carrying a question opens the picker on the first option and records
 // the session it arrived on. A newer reply REPLACES it; a reply carrying none
 // closes it (contract v3 §15 rule 4).
@@ -866,10 +881,7 @@ func TestStreamDoneMsgOpensPicker(t *testing.T) {
 // Arrow keys and j/k move the selection and clamp at both ends; nothing is sent
 // while navigating.
 func TestQuestionPickerNavigationClamps(t *testing.T) {
-	m := initialModel(&billyClient{sessionID: "tui-1"})
-	m.pendingQuestion = testConsentQuestion()
-	m.questionSession = "tui-1"
-	m.questionPickerMode = true
+	m := questionModel(t, testConsentQuestion())
 
 	step := func(mm model, key string) model {
 		next, cmd := mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
@@ -910,10 +922,7 @@ func TestQuestionPickerNavigationClamps(t *testing.T) {
 // submission: a [You] line, a real turn, and the picker closed so the choice
 // cannot be sent twice.
 func TestQuestionPickerEnterSendsTheOptionNumber(t *testing.T) {
-	m := initialModel(&billyClient{sessionID: "tui-1"})
-	m.pendingQuestion = testConsentQuestion()
-	m.questionSession = "tui-1"
-	m.questionPickerMode = true
+	m := questionModel(t, testConsentQuestion())
 	m.questionPickerIdx = 2 // "Always allow" → "3"
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -941,10 +950,7 @@ func TestQuestionPickerEnterSendsTheOptionNumber(t *testing.T) {
 // The number keys choose directly. A key beyond the option list does nothing at
 // all — it never lands on some other option.
 func TestQuestionPickerNumberKeys(t *testing.T) {
-	m := initialModel(&billyClient{sessionID: "tui-1"})
-	m.pendingQuestion = testConsentQuestion()
-	m.questionSession = "tui-1"
-	m.questionPickerMode = true
+	m := questionModel(t, testConsentQuestion())
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("4")})
 	nm := next.(model)
@@ -955,10 +961,7 @@ func TestQuestionPickerNumberKeys(t *testing.T) {
 		t.Fatalf("sent %q, want %q", got, "[You] 4")
 	}
 
-	m2 := initialModel(&billyClient{sessionID: "tui-1"})
-	m2.pendingQuestion = &PendingQuestion{QuestionID: "q-1", Question: "Which?", Options: []string{"a", "b"}, Kind: "question"}
-	m2.questionSession = "tui-1"
-	m2.questionPickerMode = true
+	m2 := questionModel(t, &PendingQuestion{QuestionID: "q-1", Question: "Which?", Options: []string{"a", "b"}, Kind: "question"})
 	next2, cmd2 := m2.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
 	nm2 := next2.(model)
 	if cmd2 != nil {
@@ -974,10 +977,7 @@ func TestQuestionPickerNumberKeys(t *testing.T) {
 // the state survives and a typed number still works (contract v3 §15 rule 3).
 func TestQuestionPickerEscSendsNothing(t *testing.T) {
 	for _, key := range []tea.KeyMsg{{Type: tea.KeyEsc}, {Type: tea.KeyCtrlC}} {
-		m := initialModel(&billyClient{sessionID: "tui-1"})
-		m.pendingQuestion = testConsentQuestion()
-		m.questionSession = "tui-1"
-		m.questionPickerMode = true
+		m := questionModel(t, testConsentQuestion())
 		m.questionPickerIdx = 1
 
 		next, cmd := m.Update(key)
@@ -1014,12 +1014,9 @@ func TestQuestionPickerFencedKindsSendTheLabel(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.kind, func(t *testing.T) {
-			m := initialModel(&billyClient{sessionID: "tui-1"})
-			m.pendingQuestion = &PendingQuestion{
+			m := questionModel(t, &PendingQuestion{
 				QuestionID: "q-1", Question: "May I?", Options: tc.opts, Kind: tc.kind,
-			}
-			m.questionSession = "tui-1"
-			m.questionPickerMode = true
+			})
 			m.questionPickerIdx = 1
 
 			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1038,13 +1035,10 @@ func TestQuestionPickerFencedKindsSendTheLabel(t *testing.T) {
 // wire (the runtime would read it as a position), so the picker sends NOTHING
 // and hands the label to the input box for the operator to send.
 func TestQuestionPickerFencedAllDigitLabelSendsNothing(t *testing.T) {
-	m := initialModel(&billyClient{sessionID: "tui-1"})
-	m.pendingQuestion = &PendingQuestion{
+	m := questionModel(t, &PendingQuestion{
 		QuestionID: "q-1", Question: "Which port?", Options: []string{"8080", "9090"},
 		Kind: questionKindPermission,
-	}
-	m.questionSession = "tui-1"
-	m.questionPickerMode = true
+	})
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	nm := next.(model)
@@ -1065,10 +1059,8 @@ func TestQuestionPickerFencedAllDigitLabelSendsNothing(t *testing.T) {
 // An answer is only ever sent on the session the question arrived on. After
 // ':session new' the picker sends nothing and says why.
 func TestQuestionPickerRefusesAChangedSession(t *testing.T) {
-	m := initialModel(&billyClient{sessionID: "tui-2"})
-	m.pendingQuestion = testConsentQuestion()
-	m.questionSession = "tui-1" // the question belonged to the previous session
-	m.questionPickerMode = true
+	m := questionModel(t, testConsentQuestion())
+	m.client.sessionID = "tui-2" // ':session new' has moved the client on
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	nm := next.(model)
@@ -1088,10 +1080,7 @@ func TestQuestionPickerRefusesAChangedSession(t *testing.T) {
 
 // A choice is not sent into a turn that is still running.
 func TestQuestionPickerRefusesWhileBusy(t *testing.T) {
-	m := initialModel(&billyClient{sessionID: "tui-1"})
-	m.pendingQuestion = testConsentQuestion()
-	m.questionSession = "tui-1"
-	m.questionPickerMode = true
+	m := questionModel(t, testConsentQuestion())
 	m.isStreaming = true
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1261,6 +1250,8 @@ func TestPendingQuestionDegradationMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.row, func(t *testing.T) {
 			m := initialModel(&billyClient{sessionID: "tui-1"})
+			sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+			m = sized.(model)
 			next, _ := m.Update(responseMsg{text: "reply", Question: tc.question, Gen: 0})
 			m = next.(model)
 			if m.questionPickerMode != tc.wantPicker {
@@ -1286,5 +1277,116 @@ func TestPendingQuestionDegradationMatrix(t *testing.T) {
 				t.Fatalf("sent %q, want %q", got, "[You] "+tc.wantSent)
 			}
 		})
+	}
+}
+
+// ── self-review regressions (contract v3) ────────────────────────────────────
+
+// ':session new' is reachable from the colon palette WHILE Billy is thinking,
+// so the in-flight reply still lands after the client has moved on. The question
+// it carries belongs to the session the TURN ran on, not to the new one — so the
+// picker refuses it and says so, instead of sending an answer onto a session the
+// runtime has nothing to match it against.
+func TestSessionNewMidTurnDoesNotRestampTheQuestion(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = sized.(model)
+
+	m.submitPrompt("read my board") // the turn runs on tui-1
+	m.execCommand("session new")    // the operator moves on mid-turn
+	if m.client.sessionID == "tui-1" {
+		t.Fatalf(":session new did not change the session")
+	}
+
+	next, _ := m.Update(responseMsg{text: "pick one", Question: testConsentQuestion(), Gen: m.streamGen})
+	nm := next.(model)
+	if nm.questionSession != "tui-1" {
+		t.Fatalf("questionSession = %q, want the turn's own session %q", nm.questionSession, "tui-1")
+	}
+
+	before := len(nm.messages)
+	next2, cmd := nm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm2 := next2.(model)
+	if cmd != nil || len(nm2.messages) != before {
+		t.Fatalf("an answer must not go out on a session the question never belonged to")
+	}
+	if nm2.saveStatus != questionSessionMovedNotice {
+		t.Fatalf("status = %q, want the session-moved notice", nm2.saveStatus)
+	}
+}
+
+// Below the two-pane layout's floor View() draws only the resize notice, so the
+// picker must not own the keyboard: enter would otherwise send a consent answer
+// chosen off a screen that never showed the question.
+func TestQuestionPickerOwnsNoKeysWhenItCannotBeDrawn(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	m = sized.(model)
+	m.pendingQuestion = testConsentQuestion()
+	m.questionSession = "tui-1"
+	m.turnSession = "tui-1"
+	m.questionPickerMode = true
+	if m.paneLayoutFits() {
+		t.Fatalf("40x20 should not clear the layout floor")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("an undrawable picker must send nothing")
+	}
+	for _, line := range nm.messages {
+		if strings.HasPrefix(line, "[You] ") {
+			t.Fatalf("an undrawable picker put an answer on the wire: %q", line)
+		}
+	}
+}
+
+// The "it is in the input box" notice must be TRUE. With a draft in the box the
+// label is left alone and the notice says to type it instead.
+func TestFencedLabelNoticeMatchesWhatActuallyHappened(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1", Question: "Which port?", Options: []string{"8080", "9090"},
+		Kind: questionKindPermission,
+	}
+
+	m := questionModel(t, q)
+	m.input.SetValue("half a sentence")
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd != nil {
+		t.Fatalf("nothing should be sent")
+	}
+	if nm.input.Value() != "half a sentence" {
+		t.Fatalf("a draft must not be clobbered, got %q", nm.input.Value())
+	}
+	if nm.saveStatus != questionTypeItYourselfNotice {
+		t.Fatalf("status = %q, want the type-it-yourself notice", nm.saveStatus)
+	}
+
+	m2 := questionModel(t, q)
+	next2, _ := m2.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm2 := next2.(model)
+	if nm2.input.Value() != "8080" || nm2.saveStatus != questionTypeItNotice {
+		t.Fatalf("empty box: input = %q status = %q", nm2.input.Value(), nm2.saveStatus)
+	}
+}
+
+// What a choice SENDS is the bytes the runtime sent, control characters and all
+// — the display sanitiser must never reach the wire, or the runtime's own
+// label match would fail.
+func TestFencedLabelIsSentByteExact(t *testing.T) {
+	label := "allow\tonce"
+	m := questionModel(t, &PendingQuestion{
+		QuestionID: "q-1", Question: "May I?", Options: []string{label, "deny"},
+		Kind: questionKindPermission,
+	})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	nm := next.(model)
+	if cmd == nil {
+		t.Fatalf("enter must send the answer")
+	}
+	if got := nm.messages[len(nm.messages)-1]; got != "[You] "+label {
+		t.Fatalf("sent %q, want the label byte-exact %q", got, "[You] "+label)
 	}
 }

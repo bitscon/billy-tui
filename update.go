@@ -240,6 +240,10 @@ func (m *model) submitPrompt(text string) tea.Cmd {
 	// animated "Billy is thinking…" spinner show until the first chunk
 	// arrives (StreamChunkMsg flips isStreaming on).
 	m.releaseStream()
+	// The session THIS turn runs on, frozen now. The reply's question is stamped
+	// with it, so a ':session new' typed while Billy is still working cannot make
+	// an old question look like it belongs to the new session.
+	m.turnSession = m.currentSessionID()
 	m.streamGen++
 	gen := m.streamGen
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -495,15 +499,29 @@ const (
 	permissionsCommand    = "/permissions"
 	permissionsBusyNotice = "Billy is still working — try :permissions again in a moment"
 
-	questionSessionMovedNotice = "That question belonged to the previous session — nothing sent"
-	questionTypeItNotice       = "This one must be typed out — the option is in the input box, press enter to send"
-	questionBusyNotice         = "Billy is still working — the choice was not sent"
+	questionSessionMovedNotice   = "That question belonged to the previous session — nothing sent"
+	questionTypeItNotice         = "This one must be typed out — the option is in the input box, press enter to send"
+	questionTypeItYourselfNotice = "This one must be typed out — type the option exactly as shown"
+	questionBusyNotice           = "Billy is still working — the choice was not sent"
 )
+
+// currentSessionID is the session an answer would go out on right now.
+func (m *model) currentSessionID() string {
+	return sessionIDOf(m.client)
+}
 
 // adoptPendingQuestion installs the question a completed reply carried, or
 // clears the state when it carried none (contract v3 §15 rule 4 — a newer reply
-// replaces the open picker outright). The session is recorded with it, because
-// the runtime matches an answer only on the session the question was asked on.
+// replaces the open picker outright).
+//
+// The session stamped on it is the session THE TURN RAN ON (turnSession), never
+// the one the client happens to hold when the reply lands. Self-review finding:
+// the colon palette is live while Billy is thinking, so ':session new' mid-turn
+// moved the client on while the in-flight reply still arrived — stamping from
+// the live client re-stamped an OLD question as belonging to the NEW session,
+// the §15 rule 2 guard then compared new to new and passed, and the answer went
+// out on a session the runtime had nothing to match it against. The operator was
+// told nothing and believed they had answered.
 func (m *model) adoptPendingQuestion(q *PendingQuestion) {
 	m.questionPickerIdx = 0
 	m.pendingQuestion = q
@@ -512,7 +530,7 @@ func (m *model) adoptPendingQuestion(q *PendingQuestion) {
 		m.questionSession = ""
 		return
 	}
-	m.questionSession = m.client.sessionID
+	m.questionSession = m.turnSession
 	m.questionPickerMode = true
 }
 
@@ -538,7 +556,7 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 	}
 	// Same session, always (contract v3 §15 rule 2): the runtime would match
 	// this answer against nothing, so it is never sent.
-	if m.questionSession != m.client.sessionID {
+	if m.questionSession != m.currentSessionID() {
 		m.clearPendingQuestion()
 		m.saveStatus = questionSessionMovedNotice
 		m.saveStatusTicks = 4
@@ -552,11 +570,18 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 	text, sendable := answerForOption(q, idx)
 	if !sendable {
 		m.questionPickerMode = false
+		// The label goes to the input box so the operator does not have to
+		// retype it — but only into an EMPTY box, because a draft they are
+		// writing is theirs. The notice then says which of the two happened:
+		// claiming the label is in the box when it was dropped is a sentence
+		// that is simply untrue (self-review finding).
 		if text != "" && m.input.Value() == "" {
 			m.input.SetValue(text)
 			m.refreshInputHeight()
+			m.saveStatus = questionTypeItNotice
+		} else {
+			m.saveStatus = questionTypeItYourselfNotice
 		}
-		m.saveStatus = questionTypeItNotice
 		m.saveStatusTicks = 4
 		return nil
 	}
@@ -1232,7 +1257,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// ── pending-question picker: navigate / choose / close (contract v3 §15) ──
-		if m.questionPickerMode && m.pendingQuestion != nil {
+		// A picker the operator CANNOT SEE must not own the keyboard (self-review
+		// finding): below the two-pane layout's floor, View() draws only the
+		// resize notice, so enter would have sent a consent answer chosen off a
+		// screen that never showed the question.
+		if m.questionPickerMode && m.pendingQuestion != nil && m.paneLayoutFits() {
 			key := msg.String()
 			switch key {
 			case "up", "k":
