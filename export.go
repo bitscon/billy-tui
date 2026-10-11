@@ -27,30 +27,37 @@ func billyDir(envVar string, sub ...string) (string, error) {
 	return dir, nil
 }
 
-// defaultDebugDir is where ctrl+s writes the chat debug log. It lives outside any
-// user's $HOME on purpose: billy-tui runs as the operator, but the "debug billy"
-// investigation runs under a separate agent account that must be able to read the
-// capture. /tmp is world-readable and needs no root setup; a reboot clearing it is
-// fine for a transient debug log. Override with BILLY_DEBUG_DIR (e.g. point it at
-// /var/lib/billy/chat-log for a reboot-durable dir, once that exists group-writable).
-const defaultDebugDir = "/tmp/billy/chat-log"
+// A ctrl+s chat capture has two readers at different uids: the operator who
+// saves it, and the agent account that runs the "debug billy" investigation.
+// Reach across those accounts comes from these modes — a 0755 directory holding
+// 0644 files, the exact shape of the captures that were readable before — and
+// NOT from moving the capture out of the operator's home. A world-readable
+// directory under /tmp also reads across accounts, but /tmp is cleared on
+// reboot: the 2026-09-08 reboot deleted every capture taken since 2026-08-11.
+// Critical files do not live in a temp directory.
+const (
+	debugDirMode  os.FileMode = 0o755
+	debugFileMode os.FileMode = 0o644
+)
 
 // saveChat writes the raw debug log — preserves all message types including
 // errors and system notices. Used by ctrl+s.
 //
-// Both the stable "latest" pointer and the timestamped archive live in
-// defaultDebugDir (override with BILLY_DEBUG_DIR); nothing is written to the
-// $HOME root. The location sits outside $HOME so the agent account that runs the
-// "debug billy" flow can read what the operator saves — cross-account reach is
-// the whole reason it moved off the home directory.
+// Both the stable "latest" pointer and the timestamped archive live under
+// ~/.billy/debug (override with BILLY_DEBUG_DIR); nothing is written to the
+// $HOME root. That location survives a reboot and is the path the architect
+// role contract opens when the operator says "debug billy"; the modes above are
+// what make the capture readable from the agent account.
 func saveChat(messages []string, sessionID string) (string, error) {
-	debugDir := os.Getenv("BILLY_DEBUG_DIR")
-	if debugDir == "" {
-		debugDir = defaultDebugDir
+	debugDir, err := billyDir("BILLY_DEBUG_DIR", "debug")
+	if err != nil {
+		return "", err
 	}
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
-		return "", fmt.Errorf("cannot create %s: %w", debugDir, err)
-	}
+	// MkdirAll applies the process umask, and a directory that already exists
+	// keeps the mode it was first created with, so re-assert it — the agent
+	// account's ability to open the capture depends on this bit. Best effort: an
+	// override directory owned by another account is not ours to change.
+	_ = os.Chmod(debugDir, debugDirMode)
 
 	latestPath := filepath.Join(debugDir, "billy-chat-debug-latest.md")
 	timestamp := time.Now().Format("2006-01-02-150405")
@@ -58,13 +65,32 @@ func saveChat(messages []string, sessionID string) (string, error) {
 
 	content := buildMarkdown(messages, sessionID)
 
-	if err := os.WriteFile(latestPath, []byte(content), 0644); err != nil {
+	if err := writeCapture(latestPath, content); err != nil {
 		return "", fmt.Errorf("cannot write latest: %w", err)
 	}
-	if err := os.WriteFile(archivePath, []byte(content), 0644); err != nil {
+	if err := writeCapture(archivePath, content); err != nil {
 		return "", fmt.Errorf("cannot write archive: %w", err)
 	}
 	return latestPath, nil
+}
+
+// writeCapture writes one capture file and pins its mode. os.WriteFile only
+// applies the mode when it creates the file, so the "latest" pointer — rewritten
+// on every save — would otherwise keep whatever mode it was first created with.
+func writeCapture(path, content string) error {
+	if err := os.WriteFile(path, []byte(content), debugFileMode); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, debugFileMode); err != nil {
+		// A capture left by another account is not ours to chmod. That only
+		// matters if the mode it already carries hides it from the agent
+		// account — group or other read is enough, both share group dev.
+		info, statErr := os.Stat(path)
+		if statErr != nil || info.Mode().Perm()&0o044 == 0 {
+			return fmt.Errorf("cannot make %s readable: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // exportChat writes a clean, human-readable conversation export. Used by
