@@ -1733,3 +1733,120 @@ func TestMultiLineQuestionIsNotDuplicatedInTheContext(t *testing.T) {
 		t.Fatalf("CRLF message: the question survived:\n%s", crlf)
 	}
 }
+
+// ── self-review wave 6 regressions ──────────────────────────────────────────
+
+// Rows reserved for the "N more" indicators go back to the content when the
+// whole list turns out to be on screen. Reserving and never returning them
+// dropped the consent screen's prose while two rows sat empty.
+func TestReservedMoreRowsGoBackWhenTheListIsWhole(t *testing.T) {
+	q := testConsentQuestion() // four options: the reserve kicks in
+	prose := "Your board is local only right now.\nNothing has left this machine yet."
+
+	for _, w := range []int{60, 80, 100, 160, 240} {
+		m := initialModel(&billyClient{sessionID: "tui-1"})
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: 16})
+		m = sized.(model)
+		m.pendingQuestion = q
+		m.questionContext = prose
+		m.questionPickerMode = true
+
+		plan := m.questionOverlayPlan()
+		if !plan.fits {
+			t.Fatalf("%dx16: the consent picker should fit", w)
+		}
+		if plan.optionRows != len(q.Options) {
+			t.Fatalf("%dx16: only %d of %d options get rows", w, plan.optionRows, len(q.Options))
+		}
+		if plan.contextRows < 2 {
+			t.Fatalf("%dx16: the prose was dropped entirely (context=%d question=%d)\n%s",
+				w, plan.contextRows, plan.questionRows, m.View())
+		}
+		if rows := strings.Count(m.View(), "\n") + 1; rows > 16 {
+			t.Fatalf("%dx16: %d rows rendered\n%s", w, rows, m.View())
+		}
+	}
+}
+
+// The notice is spent out of rows that are left over, so it never decides
+// whether the picker exists and never costs the question or the prose a row.
+func TestNoticeIsSpentOnlyOutOfSpareRows(t *testing.T) {
+	q := testConsentQuestion()
+	for _, w := range []int{60, 100, 160} {
+		for h := 8; h <= 40; h++ {
+			build := func(notice string) questionOverlayLayout {
+				m := initialModel(&billyClient{sessionID: "tui-1"})
+				sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+				m = sized.(model)
+				m.pendingQuestion = q
+				m.questionPickerMode = true
+				m.questionNotice = notice
+				return m.questionOverlayPlan()
+			}
+			bare, noticed := build(""), build(questionBusyNotice)
+			if bare.fits != noticed.fits {
+				t.Fatalf("%dx%d: a notice changed whether the picker exists", w, h)
+			}
+			if noticed.fits && noticed.optionRows != bare.optionRows {
+				t.Fatalf("%dx%d: a notice cost the option list rows (%d → %d)",
+					w, h, bare.optionRows, noticed.optionRows)
+			}
+		}
+	}
+}
+
+// The prose keeps its own line structure: every newline in it was put there by
+// the client's own filter, and flattening them ran the /permissions settings
+// listing into one unreadable paragraph.
+func TestProseKeepsItsLinesOnScreen(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = sized.(model)
+	m.pendingQuestion = &PendingQuestion{
+		QuestionID: "q-1", Question: "Which one would you like to change?",
+		Options: []string{"your Kanboard board", "your files"},
+		Kind:    "cloud_read_permissions",
+	}
+	m.questionContext = strings.Join([]string{
+		"What the cloud brain may read, and what it may not:",
+		"- your Kanboard board: asks each time",
+		"- your files: always allowed",
+	}, "\n")
+	m.questionPickerMode = true
+
+	out := m.View()
+	for _, want := range []string{
+		"- your Kanboard board: asks each time",
+		"- your files: always allowed",
+	} {
+		found := false
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the listing was flattened — %q is not on a line of its own:\n%s", want, out)
+		}
+	}
+}
+
+// An option label that is itself several lines is dropped from the prose block
+// whole, so no bare "1. …" survives to read like a forged list entry.
+func TestMultiLineOptionLabelLeavesNoForgedListLine(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{"approve\nnow", "keep it read-only"},
+		Kind:    questionKindLift,
+	}
+	message := "Lift the hold?\n\n1. approve\nnow\n2. keep it read-only\n\nReply with the option itself."
+	got := questionContext(message, q)
+	for _, unwanted := range []string{"1. approve", "2. keep it read-only"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("a numbered line survived into the prose: %q\n%s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "Reply with the option itself.") {
+		t.Fatalf("the closing line was lost:\n%s", got)
+	}
+}

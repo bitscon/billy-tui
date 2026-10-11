@@ -332,7 +332,11 @@ func (m model) View() string {
 		// where the runtime puts the sentences the operator must read before
 		// choosing — the read-only lift warning, the settings listing.
 		if plan.contextRows >= 2 && m.questionContext != "" {
-			lines := strings.Split(wrap.Render(sanitizeQuestionDisplay(m.questionContext)), "\n")
+			// Sanitised PER LINE and rejoined: every newline in this block was put
+			// there by the client's own filter, not by the brain, so flattening
+			// them ran the /permissions settings listing — the thing §15 rule 6
+			// names — into one unreadable paragraph (self-review wave 6).
+			lines := strings.Split(wrap.Render(sanitizeQuestionLines(m.questionContext)), "\n")
 			b.WriteString(strings.Join(clampQuestionLines(lines, plan.contextRows-1, width), "\n") + "\n\n")
 		}
 		// The question in the brain's OWN words, and the labels in the order and
@@ -371,7 +375,7 @@ func (m model) View() string {
 		// a leftover "✓ Exported …" or "Abandoned …" drawn on the screen a
 		// consent choice is about to be sent from is a sentence about something
 		// else entirely (self-review wave 5).
-		if m.questionNotice != "" {
+		if plan.noticeRows >= 2 && m.questionNotice != "" {
 			b.WriteString("\n" + SidebarWarnStyle.Render(truncateCells(sanitizeQuestionDisplay(m.questionNotice), width)) + "\n")
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
@@ -528,6 +532,17 @@ func sanitizeQuestionDisplay(s string) string {
 	return b.String()
 }
 
+// sanitizeQuestionLines sanitises each line of a multi-line block and rejoins
+// them, so the line structure the client itself built survives while every
+// control character inside a line is still made inert.
+func sanitizeQuestionLines(s string) string {
+	parts := strings.Split(s, "\n")
+	for i, part := range parts {
+		parts[i] = sanitizeQuestionDisplay(part)
+	}
+	return strings.Join(parts, "\n")
+}
+
 // truncateCells trims s to at most max DISPLAY CELLS, marking a cut with an
 // ellipsis. Cells, not runes: a label of wide characters is twice as wide as its
 // rune count, and bounding by runes let a CJK label render a box wider than the
@@ -572,14 +587,14 @@ func (m model) questionOverlayChrome(q *PendingQuestion) int {
 		rendered := lipgloss.NewStyle().Width(questionWrapWidth(m.width)).Render(note)
 		rows += 1 + strings.Count(rendered, "\n") + 1
 	}
-	// The notice row is counted ALWAYS, whether or not one is showing. Whether
-	// the picker can be drawn at all must not depend on transient state: counting
-	// it only when a notice was set made `fits` flip false for a two-row band of
-	// terminal heights the moment any notice appeared, so the picker silently
-	// vanished — and came back by itself when the notice expired (self-review
-	// wave 5). The rows are given back to the content share instead, in
-	// questionOverlayPlan.
-	rows += 2 // a blank plus the one-row notice line
+	// The notice line is DELIBERATELY NOT counted here. Whether the picker can be
+	// drawn at all must not depend on transient state: counting it only when a
+	// notice was set made `fits` flip false for a band of terminal heights the
+	// moment any notice appeared, so the picker silently vanished and came back
+	// by itself when the notice expired (self-review wave 5). Counting it always
+	// fixed that but raised the smallest terminal the picker is offered on by two
+	// rows (wave 6). So the fit gate ignores it, and the plan spends two rows on
+	// it only when the content can spare them.
 	return rows
 }
 
@@ -591,18 +606,22 @@ type questionOverlayLayout struct {
 	contextRows  int // includes its trailing blank; < 2 means no context block
 	questionRows int
 	optionRows   int
+	noticeRows   int // includes its leading blank; < 2 means no notice line
 }
 
 // questionOverlayPlan decides whether the picker can be drawn whole on this
 // terminal and how the rows are shared out. fits=false means no overlay and no
 // keys: a choice the operator cannot see is not a choice (contract v3 §15
-// rule 6), and the client degrades to the numbered list in the reply text.
+// rule 7), and the client degrades to the numbered list in the reply text.
 //
-// Priority when rows are scarce: the option list first (it is the actionable
-// part), then the reply's surrounding prose (the runtime puts the lift warning
-// and the settings listing there), then the question text — which is the one
-// block that is also in the reply behind the overlay and is clipped with a
-// visible ellipsis rather than dropped.
+// Priority when rows are scarce:
+//  1. the option list — the actionable part;
+//  2. the question text, up to the rows it actually needs — it is the sentence
+//     being answered, and on a privilege-escalation question it is the one the
+//     operator must read in full;
+//  3. the reply's surrounding prose, which keeps at least one line plus its
+//     blank whenever there is any, clipped with a visible ellipsis;
+//  4. the notice line, only if rows remain after all of the above.
 func (m model) questionOverlayPlan() questionOverlayLayout {
 	q := m.pendingQuestion
 	if q == nil || !m.questionPickerMode || !m.paneLayoutFits() {
@@ -624,13 +643,22 @@ func (m model) questionOverlayPlan() questionOverlayLayout {
 		return questionOverlayLayout{}
 	}
 	budget := m.height - chrome - moreRows
-	if m.questionNotice == "" {
-		budget += 2 // the notice rows chrome always reserves, given back
-	}
 	plan := questionOverlayLayout{fits: true}
 	plan.optionRows = len(q.Options)
 	if plan.optionRows > budget-1 {
 		plan.optionRows = budget - 1
+	}
+	if plan.optionRows == len(q.Options) {
+		// The whole list is on screen, so no "N more" row is drawn after all:
+		// the rows reserved for them go back to the content (self-review wave 6
+		// — reserved-and-never-returned dropped the consent screen's prose while
+		// two rows sat empty).
+		budget += moreRows
+	}
+	// The notice line is spent only out of what is left over.
+	if m.questionNotice != "" && budget-2 >= 1+plan.optionRows {
+		plan.noticeRows = 2
+		budget -= 2
 	}
 	rest := budget - plan.optionRows // always ≥ 1
 	// The QUESTION's own rows come first, up to what it actually needs: it is the

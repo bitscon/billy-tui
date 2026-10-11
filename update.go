@@ -597,10 +597,11 @@ func questionContext(message string, q *PendingQuestion) string {
 			i += n - 1
 			continue
 		}
-		trimmed := lines[i]
-		if isNumberedOptionLine(trimmed, q.Options) {
+		if n := matchNumberedOption(lines, i, q.Options); n > 0 {
+			i += n - 1
 			continue
 		}
+		trimmed := lines[i]
 		if trimmed == "" && (len(kept) == 0 || kept[len(kept)-1] == "") {
 			continue // collapse blank runs, and never open with one
 		}
@@ -636,21 +637,26 @@ func matchRun(lines []string, i int, want []string) int {
 	return len(want)
 }
 
-// isNumberedOptionLine reports whether line is the runtime's own rendering of
-// one of these options at its own position — "3. Always allow" and nothing else.
-func isNumberedOptionLine(line string, options []string) bool {
+// matchNumberedOption returns the number of lines consumed by the runtime's own
+// rendering of one of these options, starting at exactly index i, or 0.
+//
+// "3. Always allow" and nothing else: the position has to be the option's real
+// position in the list, and the label has to be that option. A label that is
+// itself several lines is rendered over several lines, so the whole run is
+// matched — matching only the first line left a bare "1. approve" standing in
+// the prose block, which reads like a forged list entry (self-review wave 6).
+func matchNumberedOption(lines []string, i int, options []string) int {
+	line := lines[i]
 	dot := strings.Index(line, ". ")
-	if dot <= 0 {
-		return false
-	}
-	if !allDigits(line[:dot]) {
-		return false
+	if dot <= 0 || !allDigits(line[:dot]) {
+		return 0
 	}
 	position, err := strconv.Atoi(line[:dot])
 	if err != nil || position < 1 || position > len(options) {
-		return false
+		return 0
 	}
-	return strings.TrimSpace(line[dot+2:]) == strings.TrimSpace(options[position-1])
+	want := trimmedLines(fmt.Sprintf("%d. %s", position, strings.TrimSpace(options[position-1])))
+	return matchRun(lines, i, want)
 }
 
 // chooseQuestionOption answers the open question with the option at idx, over

@@ -486,14 +486,16 @@ text (its chunk is empty), so content parity holds.
    read-only lift warning, and the whole settings listing that is the "view" half
    of `/permissions` — so a picker that covered the reply would hide exactly what
    the operator is meant to read before choosing. The client carries that prose
-   with the question and draws it above it, and gives it rows ahead of the
-   question text when the terminal is short. It is obtained by a deterministic
+   with the question and draws it above it. It is obtained by a deterministic
    filter on strings the client already holds verbatim (drop the question line,
    drop `"<n>. <label>"` for the option actually at position n, collapse blank
-   runs) — never by reading the prose, and a question that is itself several
-   lines is dropped as one block so it cannot appear twice. Rows go to the
-   question first, up to what it needs, and the prose is clipped with a visible
-   ellipsis rather than dropped. Any notice the picker itself raises is drawn
+   runs) — never by reading the prose, and a question or an option label that is
+   itself several lines is dropped as one block so no part of it can appear
+   twice. Rows go to the option list first, then to the question up to what it
+   needs, then to the prose, which always keeps at least one line and is clipped
+   with a visible ellipsis rather than dropped. The prose keeps its own line
+   structure on screen: the `/permissions` settings listing is a list, and
+   flattening it would make it unreadable. Any notice the picker itself raises is drawn
    inside the overlay too, since the overlay covers the status bar — and it is
    the picker's OWN notice, never the client's global status line, so a leftover
    sentence about an export or a model switch is never drawn on the screen a
@@ -546,7 +548,7 @@ type PendingQuestion struct {
 | new, question armed, `permission` / `lift_read_only` | object | picker opens; a choice sends the option label typed out verbatim — never a number |
 | new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
 | question armed, fenced kind with a control character in the label | object | picker sends nothing and echoes nothing; it says the option cannot be sent safely |
-| question armed, reply carried prose around the question | object | the prose is drawn above the question, clipped with an ellipsis before the question is |
+| question armed, reply carried prose around the question | object | the prose is drawn above the question, keeping at least one line, clipped with an ellipsis rather than dropped |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
 | question armed, session changed since | object | picker sends nothing and says the session changed |
 | question armed, turn still in flight | object | picker sends nothing and says Billy is still working (defensive: a submission closes the picker, so the client's own flow does not reach this) |
