@@ -442,11 +442,15 @@ func questionWrapWidth(termWidth int) int {
 // offered only when the WHOLE list is on screen: with a windowed list a number
 // would name an option the operator cannot see.
 func questionPickerHint(q *PendingQuestion, allVisible bool) string {
+	// Short enough to fit the wrap width at the client's narrowest supported
+	// terminal: the longer wording clipped to "…esc close (n…" between 60 and 70
+	// columns (self-review wave 3). "cancel" is this client's own word for a
+	// picker that sends nothing, used by the model, routing and floor pickers.
 	keys := "↑/↓ move · enter choose"
 	if n := questionNumberKeys(q); n > 1 && allVisible {
-		keys = fmt.Sprintf("↑/↓ move · 1–%d choose · enter choose", n)
+		keys = fmt.Sprintf("↑/↓ move · enter or 1–%d choose", n)
 	}
-	return keys + " · esc close (nothing sent)"
+	return keys + " · esc cancel"
 }
 
 // questionSubjectLine names what a permission request is about, from the
@@ -498,7 +502,8 @@ func sanitizeQuestionDisplay(s string) string {
 		switch {
 		case r < 0x20 || r == 0x7f, r >= 0x80 && r <= 0x9f:
 			b.WriteRune(' ')
-		case r == 0x200e || r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+		case r == 0x200e || r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069,
+			r == 0x2028 || r == 0x2029:
 			b.WriteRune(' ')
 		default:
 			b.WriteRune(r)

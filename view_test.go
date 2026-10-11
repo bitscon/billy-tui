@@ -346,8 +346,8 @@ func TestQuestionPickerOverlayRendersVerbatim(t *testing.T) {
 		"2. Allow for this conversation",
 		"3. Always allow",
 		"4. Don't allow",
-		"1–4 choose",
-		"esc close (nothing sent)",
+		"enter or 1–4 choose",
+		"esc cancel",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("question overlay missing %q:\n%s", want, out)
@@ -528,7 +528,7 @@ func TestQuestionOverlayIsHeightBounded(t *testing.T) {
 	if rows := strings.Count(out, "\n") + 1; rows > 24 {
 		t.Fatalf("overlay is %d rows on a 24-row terminal:\n%s", rows, out)
 	}
-	for _, want := range []string{"1. Allow once", "4. Don't allow", "esc close (nothing sent)"} {
+	for _, want := range []string{"1. Allow once", "4. Don't allow", "esc cancel"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("a long question pushed %q off the screen:\n%s", want, out)
 		}
@@ -604,7 +604,7 @@ func TestQuestionOverlayNeverOverflowsTheTerminal(t *testing.T) {
 						}
 					}
 					// The two things the operator must always be able to see.
-					if !strings.Contains(out, questionPickerTitle) || !strings.Contains(out, "esc close") {
+					if !strings.Contains(out, questionPickerTitle) || !strings.Contains(out, "esc cancel") {
 						t.Fatalf("%dx%d kind=%s idx=%d: the title or the key line was pushed off\n%s", w, h, q.Kind, idx, out)
 					}
 					// And the option they are about to choose.
@@ -699,6 +699,9 @@ func TestSanitizeQuestionDisplay(t *testing.T) {
 	// bytes a choice sends, so they are made inert too.
 	if got := sanitizeQuestionDisplay("Allow\u202eonce\u2066"); got != "Allow once " {
 		t.Fatalf("bidi overrides survived: %q", got)
+	}
+	if got := sanitizeQuestionDisplay("a\u2028b\u2029c"); got != "a b c" {
+		t.Fatalf("unicode line/paragraph separators survived: %q", got)
 	}
 	for _, keep := range []string{"Allow once", "Don't allow", "notes/today.md", "qwen3.5:9b", "café — ok"} {
 		if got := sanitizeQuestionDisplay(keep); got != keep {

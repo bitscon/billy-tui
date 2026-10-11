@@ -1425,7 +1425,7 @@ func TestQuestionNumberKeyIgnoresAnOffScreenOption(t *testing.T) {
 		t.Fatalf("the selection must not move, got %d", nm.questionPickerIdx)
 	}
 	// And the key line does not offer the numbers while the list is windowed.
-	if strings.Contains(m.View(), "choose · enter") && strings.Contains(m.View(), "1–") {
+	if strings.Contains(m.View(), "1–") {
 		t.Fatalf("the key line offers numbers for a windowed list:\n%s", m.View())
 	}
 }

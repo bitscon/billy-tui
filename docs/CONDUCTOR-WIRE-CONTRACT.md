@@ -475,7 +475,8 @@ text (its chunk is empty), so content parity holds.
    today's behaviour — the numbered list in the reply text, answered from the
    input box. For the same reason a number key chooses only an option that is on
    screen: with a windowed list the key line stops offering the numbers at all,
-   and a number naming a scrolled-away option does nothing.
+   and a number naming a scrolled-away option does nothing — while a number
+   naming a row that IS printed still chooses that row.
 7. **`:permissions`** sends the literal message `/permissions` on the current
    session, and nothing else: the runtime's own recognizer requires it as the whole
    message. The two-step flow that follows (pick a source, then pick its setting) is
@@ -515,8 +516,8 @@ type PendingQuestion struct {
 | new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
 | question armed, session changed since | object | picker sends nothing and says the session changed |
-| question armed, turn still in flight | object | picker sends nothing and says Billy is still working |
+| question armed, turn still in flight | object | picker sends nothing and says Billy is still working (defensive: a submission closes the picker, so the client's own flow does not reach this) |
 | question armed, terminal too small to draw the picker whole | object | overlay is not drawn, picker owns no keys, nothing sent; the numbered list in the reply text still answers |
-| question armed, more options than fit on screen | object | list windowed with a "N more" row; number keys withdrawn, arrows and enter still choose |
+| question armed, more options than fit on screen | object | list windowed with a "N more" row; the key line stops advertising the numbers, a number naming a scrolled-away option does nothing, and a number naming a visible row still chooses it |
 | question armed, text or label carries control characters | object | the controls are made inert on screen; a choice still sends the bytes as received |
 | new runtime, old client | ignored | today's behavior (unknown fields dropped) |
