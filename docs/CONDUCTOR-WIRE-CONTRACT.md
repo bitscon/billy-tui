@@ -432,12 +432,17 @@ text (its chunk is empty), so content parity holds.
    - a label that is itself **all digits** is ambiguous on the wire (the runtime
      would read it as a position): nothing is sent, and the label goes to the
      input box for the operator to send;
-   - a label carrying **control characters** is refused outright and echoed
-     nowhere. A fenced answer is the label byte-exact, so those bytes would also
-     reach the transcript, the resize redraw and the input history, none of which
-     sanitise for display — and a `lift_read_only` label is written by the brain,
-     which neither the `ask_operator` validator nor the egress guards screen for
-     control characters.
+   - a label carrying **control characters** is refused: nothing is sent and the
+     PICKER echoes it nowhere — not the transcript, not the input box, not the
+     input history. A fenced answer is the label byte-exact, so choosing it would
+     otherwise put those bytes through display paths that do not sanitise, and a
+     `lift_read_only` label is written by the brain, which neither the
+     `ask_operator` validator nor the runtime's egress guards screen for control
+     characters. **Bounded claim:** this covers what the picker sends and echoes.
+     The reply TEXT the runtime rendered already carries the same bytes, and the
+     client's pre-existing transcript, live-stream and export paths are unchanged
+     by this surface — sanitising those is a registered follow-up, not a claim
+     made here.
 2. **Same session, always.** The session recorded with a question is the session
    **the turn ran on**, frozen when the turn was submitted — not whatever session
    the client happens to hold when the reply lands. (`:session new` is reachable
@@ -485,8 +490,15 @@ text (its chunk is empty), so content parity holds.
    question text when the terminal is short. It is obtained by a deterministic
    filter on strings the client already holds verbatim (drop the question line,
    drop `"<n>. <label>"` for the option actually at position n, collapse blank
-   runs) — never by reading the prose. Any notice the picker itself raises is
-   drawn inside the overlay too, since the overlay covers the status bar.
+   runs) — never by reading the prose, and a question that is itself several
+   lines is dropped as one block so it cannot appear twice. Rows go to the
+   question first, up to what it needs, and the prose is clipped with a visible
+   ellipsis rather than dropped. Any notice the picker itself raises is drawn
+   inside the overlay too, since the overlay covers the status bar — and it is
+   the picker's OWN notice, never the client's global status line, so a leftover
+   sentence about an export or a model switch is never drawn on the screen a
+   choice is sent from. Whether the picker can be drawn at all never depends on
+   whether a notice is showing.
 7. **A choice the operator cannot see is not a choice.** The picker is offered
    only when it can be drawn WHOLE. One predicate decides both whether the
    overlay renders and whether it owns the keyboard, so the screen and the keys
@@ -534,6 +546,7 @@ type PendingQuestion struct {
 | new, question armed, `permission` / `lift_read_only` | object | picker opens; a choice sends the option label typed out verbatim — never a number |
 | new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
 | question armed, fenced kind with a control character in the label | object | picker sends nothing and echoes nothing; it says the option cannot be sent safely |
+| question armed, reply carried prose around the question | object | the prose is drawn above the question, clipped with an ellipsis before the question is |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |
 | question armed, session changed since | object | picker sends nothing and says the session changed |
 | question armed, turn still in flight | object | picker sends nothing and says Billy is still working (defensive: a submission closes the picker, so the client's own flow does not reach this) |

@@ -365,11 +365,14 @@ func (m model) View() string {
 		if note := questionPickerNote(q); note != "" {
 			b.WriteString("\n" + DimStyle.Render(wrap.Render(note)) + "\n")
 		}
-		// The status line the picker itself sets (a refusal, a notice) is drawn
-		// HERE: the overlay covers the status bar, so a notice left there would be
-		// set and never seen.
-		if m.saveStatus != "" {
-			b.WriteString("\n" + SidebarWarnStyle.Render(truncateCells(sanitizeQuestionDisplay(m.saveStatus), width)) + "\n")
+		// The notice the picker itself raised is drawn HERE: the overlay covers
+		// the status bar, so a notice left there would be set and never seen.
+		// It is the PICKER's own field, never the client's global status line —
+		// a leftover "✓ Exported …" or "Abandoned …" drawn on the screen a
+		// consent choice is about to be sent from is a sentence about something
+		// else entirely (self-review wave 5).
+		if m.questionNotice != "" {
+			b.WriteString("\n" + SidebarWarnStyle.Render(truncateCells(sanitizeQuestionDisplay(m.questionNotice), width)) + "\n")
 		}
 		overlay := HelpOverlayStyle.Render(strings.TrimRight(b.String(), "\n"))
 		return lipgloss.Place(
@@ -569,9 +572,14 @@ func (m model) questionOverlayChrome(q *PendingQuestion) int {
 		rendered := lipgloss.NewStyle().Width(questionWrapWidth(m.width)).Render(note)
 		rows += 1 + strings.Count(rendered, "\n") + 1
 	}
-	if m.saveStatus != "" {
-		rows += 2 // a blank plus the one-row status line
-	}
+	// The notice row is counted ALWAYS, whether or not one is showing. Whether
+	// the picker can be drawn at all must not depend on transient state: counting
+	// it only when a notice was set made `fits` flip false for a two-row band of
+	// terminal heights the moment any notice appeared, so the picker silently
+	// vanished — and came back by itself when the notice expired (self-review
+	// wave 5). The rows are given back to the content share instead, in
+	// questionOverlayPlan.
+	rows += 2 // a blank plus the one-row notice line
 	return rows
 }
 
@@ -616,21 +624,40 @@ func (m model) questionOverlayPlan() questionOverlayLayout {
 		return questionOverlayLayout{}
 	}
 	budget := m.height - chrome - moreRows
+	if m.questionNotice == "" {
+		budget += 2 // the notice rows chrome always reserves, given back
+	}
 	plan := questionOverlayLayout{fits: true}
 	plan.optionRows = len(q.Options)
 	if plan.optionRows > budget-1 {
 		plan.optionRows = budget - 1
 	}
 	rest := budget - plan.optionRows // always ≥ 1
-	if m.questionContext != "" {
-		want := m.renderedLineCount(m.questionContext) + 1 // + its trailing blank
-		if want > rest-1 {
-			want = rest - 1 // never at the cost of the question's last row
-		}
-		if want >= 2 {
-			plan.contextRows = want
+	// The QUESTION's own rows come first, up to what it actually needs: it is the
+	// sentence being answered, and on a privilege-escalation question it is the
+	// one the operator must read in full. Taking the prose's share off the top
+	// clipped a two-row question to one (self-review wave 5).
+	want := m.renderedLineCount(q.Question)
+	if m.questionContext != "" && want > rest-2 {
+		// Leave the prose at least one line plus its blank: a warning clipped to
+		// an ellipsis is still a warning, one dropped entirely is silence.
+		want = rest - 2
+		if want < 1 {
+			want = 1
 		}
 	}
+	if want > rest {
+		want = rest
+	}
+	plan.questionRows = want
+	if remaining := rest - plan.questionRows; m.questionContext != "" && remaining >= 2 {
+		contextWant := m.renderedLineCount(m.questionContext) + 1 // + its trailing blank
+		if contextWant > remaining {
+			contextWant = remaining
+		}
+		plan.contextRows = contextWant
+	}
+	// Anything the prose did not need goes back to the question.
 	plan.questionRows = rest - plan.contextRows
 	if plan.questionRows < 1 {
 		plan.questionRows = 1

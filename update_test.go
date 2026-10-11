@@ -1603,3 +1603,133 @@ func TestQuestionPickerOwnsNoKeysWhenTheOverlayWouldNotFit(t *testing.T) {
 		t.Fatalf("an undrawable picker must not be drawn:\n%s", m.View())
 	}
 }
+
+// ── self-review wave 5 regressions ──────────────────────────────────────────
+
+// The question's own rows come first: the prose that travels with it must not
+// squeeze the sentence being answered down to a clipped line while there is
+// room for it. It bit hardest on the read-only lift question, which is the one
+// privilege escalation in this feature.
+func TestQuestionKeepsItsRowsAgainstTheProse(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1",
+		Question:   "Shall I lift the hold so I can make changes in this conversation, or keep it read-only?",
+		Options:    []string{"approve", "keep it read-only"},
+		Kind:       questionKindLift,
+	}
+	prose := strings.Join([]string{
+		"This conversation is read-only.",
+		"Answering 'approve' — typed, not numbered — is what lets me make changes in it.",
+		"Any other answer keeps it read-only.",
+		"Reply with the option itself, typed out.",
+	}, "\n")
+
+	for _, size := range [][2]int{{80, 21}, {80, 24}, {100, 18}, {120, 30}} {
+		m := initialModel(&billyClient{sessionID: "tui-1"})
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		m = sized.(model)
+		m.pendingQuestion = q
+		m.questionContext = prose
+		m.questionPickerMode = true
+
+		plan := m.questionOverlayPlan()
+		if !plan.fits {
+			continue
+		}
+		need := m.renderedLineCount(q.Question)
+		if plan.questionRows < need {
+			t.Fatalf("%dx%d: question got %d of the %d rows it needs (context got %d)\n%s",
+				size[0], size[1], plan.questionRows, need, plan.contextRows, m.View())
+		}
+		if plan.contextRows < 2 {
+			t.Fatalf("%dx%d: the warning was dropped entirely, not clipped\n%s", size[0], size[1], m.View())
+		}
+	}
+}
+
+// Whether the picker can be drawn at all must NEVER depend on transient state:
+// counting the notice row only when a notice was showing made the picker vanish
+// for a band of terminal heights the moment any notice appeared, and come back
+// by itself when it expired.
+func TestPickerFitDoesNotDependOnANotice(t *testing.T) {
+	questions := []*PendingQuestion{
+		testConsentQuestion(),
+		{QuestionID: "q", Question: "Lift it?", Options: []string{"approve", "no"}, Kind: questionKindLift},
+		{QuestionID: "q", Question: "May I?", Options: []string{"allow once", "deny"},
+			Kind: questionKindPermission, Tool: "write_file", Target: "notes/today.md"},
+		{QuestionID: "q", Question: "Which?", Options: []string{"a", "b"}, Kind: questionKindDefault},
+	}
+	for _, q := range questions {
+		for _, w := range []int{60, 100, 160} {
+			for h := 8; h <= 40; h++ {
+				build := func(notice string) bool {
+					m := initialModel(&billyClient{sessionID: "tui-1"})
+					sized, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+					m = sized.(model)
+					m.pendingQuestion = q
+					m.questionPickerMode = true
+					m.questionNotice = notice
+					return m.questionOverlayPlan().fits
+				}
+				if build("") != build(questionBusyNotice) {
+					t.Fatalf("%dx%d kind=%s: a notice changed whether the picker exists", w, h, q.Kind)
+				}
+			}
+		}
+	}
+}
+
+// The picker's notice is its OWN. A leftover notice about an export, a model
+// switch or an abandoned turn must never be drawn on the screen a consent
+// choice is sent from.
+func TestGlobalStatusNoticesStayOffTheConsentScreen(t *testing.T) {
+	m := initialModel(&billyClient{sessionID: "tui-1"})
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = sized.(model)
+	m.saveStatus = "✓ Exported → /somewhere/chat.md"
+	m.saveStatusTicks = 4
+
+	next, _ := m.Update(responseMsg{text: "pick one", Question: testConsentQuestion(), Gen: 0})
+	nm := next.(model)
+	if nm.questionNotice != "" {
+		t.Fatalf("a fresh question must carry no notice, got %q", nm.questionNotice)
+	}
+	if strings.Contains(nm.View(), "Exported") {
+		t.Fatalf("an unrelated status notice is drawn on the consent screen:\n%s", nm.View())
+	}
+}
+
+// A question that is itself several lines is dropped from the context whole, so
+// it is never rendered twice.
+func TestMultiLineQuestionIsNotDuplicatedInTheContext(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1",
+		Question:   "Reading your board means sending it to the cloud brain.\nWhat should I do?",
+		Options:    []string{"Allow once", "Don't allow"},
+		Kind:       "cloud_read_consent",
+	}
+	message := strings.Join([]string{
+		"Here is some prose.",
+		"",
+		"Reading your board means sending it to the cloud brain.",
+		"What should I do?",
+		"",
+		"1. Allow once",
+		"2. Don't allow",
+		"",
+		"Reply with the number or the option itself.",
+	}, "\n")
+
+	got := questionContext(message, q)
+	if strings.Contains(got, "What should I do?") {
+		t.Fatalf("the multi-line question survived into the context:\n%s", got)
+	}
+	if !strings.Contains(got, "Here is some prose.") || !strings.Contains(got, "Reply with the number") {
+		t.Fatalf("the context lost real prose:\n%s", got)
+	}
+
+	// CRLF line endings are handled the same way.
+	if crlf := questionContext(strings.ReplaceAll(message, "\n", "\r\n"), q); strings.Contains(crlf, "What should I do?") {
+		t.Fatalf("CRLF message: the question survived:\n%s", crlf)
+	}
+}

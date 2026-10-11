@@ -543,6 +543,7 @@ func (m *model) currentSessionID() string {
 func (m *model) adoptPendingQuestion(q *PendingQuestion, message string) {
 	m.questionPickerIdx = 0
 	m.pendingQuestion = q
+	m.questionNotice = ""
 	if q == nil {
 		m.questionPickerMode = false
 		m.questionSession = ""
@@ -568,6 +569,7 @@ func (m *model) clearPendingQuestion() {
 	m.questionPickerIdx = 0
 	m.questionSession = ""
 	m.questionContext = ""
+	m.questionNotice = ""
 }
 
 // questionContext is what the reply said AROUND the question: the whole message
@@ -583,13 +585,19 @@ func questionContext(message string, q *PendingQuestion) string {
 	if q == nil {
 		return ""
 	}
-	question := strings.TrimSpace(q.Question)
+	// The question may itself be several lines; the runtime appends it as one
+	// element, so a contiguous run of lines matching it is the question and is
+	// dropped whole. Matching single lines only left a two-line question standing
+	// in the context and rendered twice (self-review wave 5).
+	questionLines := trimmedLines(strings.TrimSpace(q.Question))
+	lines := trimmedLines(strings.ReplaceAll(message, "\r\n", "\n"))
 	kept := make([]string, 0, 16)
-	for _, line := range strings.Split(message, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == question {
+	for i := 0; i < len(lines); i++ {
+		if n := matchRun(lines, i, questionLines); n > 0 {
+			i += n - 1
 			continue
 		}
+		trimmed := lines[i]
 		if isNumberedOptionLine(trimmed, q.Options) {
 			continue
 		}
@@ -602,6 +610,30 @@ func questionContext(message string, q *PendingQuestion) string {
 		kept = kept[:len(kept)-1]
 	}
 	return strings.Join(kept, "\n")
+}
+
+// trimmedLines splits text into lines with each line trimmed.
+func trimmedLines(text string) []string {
+	parts := strings.Split(text, "\n")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, strings.TrimSpace(part))
+	}
+	return out
+}
+
+// matchRun returns the length of want where it appears in lines at exactly
+// index i, or 0. An empty want never matches.
+func matchRun(lines []string, i int, want []string) int {
+	if len(want) == 0 || want[0] == "" || i+len(want) > len(lines) {
+		return 0
+	}
+	for n, line := range want {
+		if lines[i+n] != line {
+			return 0
+		}
+	}
+	return len(want)
 }
 
 // isNumberedOptionLine reports whether line is the runtime's own rendering of
@@ -640,6 +672,8 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 		return nil
 	}
 	if m.thinking || m.isStreaming {
+		// The picker stays open, so this one is drawn inside the overlay.
+		m.questionNotice = questionBusyNotice
 		m.saveStatus = questionBusyNotice
 		m.saveStatusTicks = 4
 		return nil
@@ -650,18 +684,21 @@ func (m *model) chooseQuestionOption(idx int) tea.Cmd {
 		switch {
 		case !stageable:
 			// The label is not safe to put anywhere the terminal will act on it.
-			m.saveStatus = questionUnsafeLabelNotice
+			m.questionNotice = questionUnsafeLabelNotice
 		case m.input.Value() == "":
 			// Put it in front of the operator so they do not have to retype it,
 			// but only into an EMPTY box — a draft they are writing is theirs.
 			m.input.SetValue(text)
 			m.refreshInputHeight()
-			m.saveStatus = questionTypeItNotice
+			m.questionNotice = questionTypeItNotice
 		default:
 			// The notice has to say what actually happened: claiming the label is
 			// in the box when it was dropped is simply untrue.
-			m.saveStatus = questionTypeItYourselfNotice
+			m.questionNotice = questionTypeItYourselfNotice
 		}
+		// The picker is closed on these paths, so the notice is also mirrored to
+		// the status bar where the operator can still see it.
+		m.saveStatus = m.questionNotice
 		m.saveStatusTicks = 4
 		return nil
 	}
