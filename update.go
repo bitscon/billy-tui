@@ -653,21 +653,31 @@ func matchNumberedOption(lines []string, i int, options []string) int {
 	if err != nil || position < 1 || position > len(options) {
 		return 0
 	}
-	// The FIRST line is compared on its trimmed remainder, so a label the
-	// runtime padded still matches (a byte-exact comparison left "1.  approve"
-	// standing in the prose block for a label of " approve"). Later lines of a
-	// multi-line label are matched as a run.
+	// The FIRST line is compared on its trimmed remainder, so a label the runtime
+	// padded still matches (a byte-exact comparison left "1.  approve" standing in
+	// the prose block for a label of " approve"). The label's later lines are then
+	// matched here rather than through matchRun, which refuses a run whose first
+	// element is blank — a label like "approve\n\nreally" has exactly that shape,
+	// and it must match too.
+	//
+	// ALL OR NOTHING: if any later line does not match, this is not the runtime's
+	// rendering of that option and NOTHING is consumed. Consuming just the first
+	// line on a failed match left a fragment of a multi-line label standing in the
+	// prose block, and deleted a prose line that merely looked like a list entry
+	// (self-review wave 8).
 	labelLines := trimmedLines(options[position-1])
 	if strings.TrimSpace(line[dot+2:]) != labelLines[0] {
 		return 0
 	}
-	if len(labelLines) == 1 {
-		return 1
+	if i+len(labelLines) > len(lines) {
+		return 0
 	}
-	if n := matchRun(lines, i+1, labelLines[1:]); n > 0 {
-		return 1 + n
+	for n, want := range labelLines[1:] {
+		if lines[i+1+n] != want {
+			return 0
+		}
 	}
-	return 1
+	return len(labelLines)
 }
 
 // chooseQuestionOption answers the open question with the option at idx, over

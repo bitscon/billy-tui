@@ -492,10 +492,12 @@ text (its chunk is empty), so content parity holds.
    runs) — never by reading the prose, and a question or an option label that is
    itself several lines is dropped as one block so no part of it can appear
    twice. Rows go to the option list first, then to the question up to what it
-   needs, then to the note, then to the prose — which is clipped with a visible
-   ellipsis whenever two rows can be spared for it, and only dropped when there
-   are none; anything still unspent goes back to the question, so nothing is
-   clipped while a row sits empty. The prose keeps its own line
+   needs, then to the prose — clipped with a visible ellipsis whenever two rows
+   can be spared for it, and dropped only when fewer than two remain — and then
+   to the client's own note, which is the first thing to go because the prose is
+   where the runtime puts the sentence that says what answering actually does.
+   Anything still unspent goes back to the question, so nothing is clipped while
+   a row sits empty. The prose keeps its own line
    structure on screen: the `/permissions` settings listing is a list, and
    flattening it would make it unreadable. The overlay never draws the client's
    global status line, so a leftover sentence about an export or a model switch
@@ -548,7 +550,7 @@ type PendingQuestion struct {
 | new, ordinary turn | `null` | nothing pending; any open picker closes |
 | new, question armed, kind takes a number | object, 2–4 options | picker opens; a choice sends the option's number on the same session |
 | new, question armed, `permission` / `lift_read_only` | object | picker opens; a choice sends the option label typed out verbatim — never a number |
-| new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to the input box for the operator to send |
+| new, question armed, fenced kind with an all-digit label | object | picker sends nothing; the label goes to an EMPTY input box for the operator to send, and where a draft is already there it is left alone and the operator is asked to type the option |
 | question armed, fenced kind with a control character in the label | object | picker sends nothing and echoes nothing; it says the option cannot be sent safely |
 | question armed, reply carried prose around the question | object | the prose is drawn above the question, clipped with an ellipsis whenever two rows can be spared for it |
 | malformed (non-object, null id, <2 options, blank option) | object | nothing pending; the reply text is delivered untouched and no picker opens |

@@ -1879,3 +1879,70 @@ func TestPaddedOptionLabelIsStillDroppedFromTheContext(t *testing.T) {
 		t.Fatalf("the closing line was lost:\n%s", got)
 	}
 }
+
+// ── self-review wave 8 regressions ──────────────────────────────────────────
+
+// A numbered line is consumed ALL OR NOTHING. Consuming just the first line on
+// a failed match left a fragment of a multi-line label standing above the
+// question as if it were reply prose, and deleted a prose line that merely
+// looked like a list entry.
+func TestNumberedLineIsConsumedAllOrNothing(t *testing.T) {
+	// A label with a blank line inside it: the runtime strips each label but a
+	// blank line survives inside one, so this shape reaches the wire.
+	gapped := &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{"approve\n\nreally", "keep it read-only"},
+		Kind:    questionKindLift,
+	}
+	got := questionContext("Lift the hold?\n\n1. approve\n\nreally\n2. keep it read-only\n\nReply with the option itself.", gapped)
+	for _, fragment := range []string{"1. approve", "really"} {
+		if strings.Contains(got, fragment) {
+			t.Fatalf("a fragment of the label survived into the prose: %q\n%s", fragment, got)
+		}
+	}
+	if !strings.Contains(got, "Reply with the option itself.") {
+		t.Fatalf("the closing line was lost:\n%s", got)
+	}
+
+	// A prose line that merely LOOKS like a list entry is kept whole, because the
+	// label's continuation is not there.
+	twoLine := &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{"approve\nwith care", "deny"},
+		Kind:    questionKindLift,
+	}
+	quoted := questionContext("Earlier you wrote:\n1. approve\nand I disagreed.\n\nLift the hold?", twoLine)
+	for _, want := range []string{"Earlier you wrote:", "1. approve", "and I disagreed."} {
+		if !strings.Contains(quoted, want) {
+			t.Fatalf("the filter deleted a prose line it never verified — %q missing:\n%s", want, quoted)
+		}
+	}
+}
+
+// On a short terminal the runtime's prose outranks the client's own note: the
+// note was keeping three rows while the read-only warning — the sentence that
+// says what approving actually does — was dropped entirely.
+func TestProseOutranksTheClientsOwnNote(t *testing.T) {
+	q := &PendingQuestion{
+		QuestionID: "q-1", Question: "Lift the hold?",
+		Options: []string{"approve", "keep it read-only"},
+		Kind:    questionKindLift,
+	}
+	for _, size := range [][2]int{{60, 14}, {60, 15}, {80, 14}, {100, 13}} {
+		m := initialModel(&billyClient{sessionID: "tui-1"})
+		sized, _ := m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		m = sized.(model)
+		m.pendingQuestion = q
+		m.questionContext = "This conversation is read-only. Answering 'approve' is what lets me make changes in it."
+		m.questionPickerMode = true
+
+		plan := m.questionOverlayPlan()
+		if !plan.fits {
+			continue
+		}
+		if plan.contextRows < 2 {
+			t.Fatalf("%dx%d: the warning was dropped (note kept %d rows)\n%s",
+				size[0], size[1], plan.noteRows, m.View())
+		}
+	}
+}

@@ -582,8 +582,10 @@ type questionOverlayLayout struct {
 //  2. the question text, up to the rows it needs — it is the sentence being
 //     answered, and on a privilege-escalation question it is the one the
 //     operator must read in full;
-//  3. the note, all of it or none;
-//  4. the reply's surrounding prose, clipped with a visible ellipsis;
+//  3. the reply's surrounding prose, clipped with a visible ellipsis — it
+//     outranks the client's own note, because it is where the runtime puts the
+//     sentence that says what answering actually does;
+//  4. the note, all of it or none;
 //  5. anything still unspent goes back to the question, so nothing is clipped
 //     while a row sits empty.
 //
@@ -665,19 +667,23 @@ func (m model) questionOverlayPlan() questionOverlayLayout {
 	}
 	remaining -= plan.questionRows
 
-	// 3. The note: all of it or none of it.
-	if noteWant > 0 && remaining >= noteWant {
-		plan.noteRows = noteWant
-		remaining -= noteWant
-	}
-
-	// 4. The prose, clipped rather than dropped whenever two rows can be spared.
+	// 3. The prose, clipped rather than dropped whenever two rows can be spared.
+	// It comes BEFORE the client's own note: on a short terminal the note was
+	// keeping three rows while the runtime's read-only warning — the sentence
+	// that says what approving actually does — was dropped entirely (self-review
+	// wave 8).
 	if contextWant > 0 && remaining >= 2 {
 		plan.contextRows = contextWant
 		if plan.contextRows > remaining {
 			plan.contextRows = remaining
 		}
 		remaining -= plan.contextRows
+	}
+
+	// 4. The note: all of it or none of it.
+	if noteWant > 0 && remaining >= noteWant {
+		plan.noteRows = noteWant
+		remaining -= noteWant
 	}
 
 	// 5. Nothing is clipped while a row sits empty.
