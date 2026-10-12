@@ -8,6 +8,19 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// defaultSocketPath is Billy's kernel-verified Unix socket (billy-runtime STEP-717): over it
+// the runtime knows the caller is the operator, so /model and the brain-floor writes work.
+// The plain loopback web port is anonymous and refuses those writes.
+const defaultSocketPath = "/home/billyb/.billy/sock/billy.sock"
+
+// defaultAddr prefers the verified socket when it exists and falls back to the loopback port.
+func defaultAddr(socketPath string) string {
+	if fi, err := os.Stat(socketPath); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		return "unix://" + socketPath
+	}
+	return "http://localhost:5001"
+}
+
 func main() {
 	addr := flag.String("addr", "", "billy-runtime address")
 	flag.Parse()
@@ -15,7 +28,7 @@ func main() {
 		*addr = os.Getenv("BILLY_ADDR")
 	}
 	if *addr == "" {
-		*addr = "http://localhost:5001"
+		*addr = defaultAddr(defaultSocketPath)
 	}
 
 	client := newBillyClient(*addr)
