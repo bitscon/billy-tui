@@ -48,16 +48,39 @@ const (
 // $HOME root. That location survives a reboot and is the path the architect
 // role contract opens when the operator says "debug billy"; the modes above are
 // what make the capture readable from the agent account.
-func saveChat(messages []string, sessionID string) (string, error) {
-	debugDir, err := billyDir("BILLY_DEBUG_DIR", "debug")
-	if err != nil {
-		return "", err
+// sharedDebugDir is the durable capture directory both readers share (2026-10-12): the
+// operator's home is 0750, so a capture under ~/.billy/debug was unreachable from the agent
+// account no matter its own mode, and "debug billy" had been reading a file last written on
+// 2026-08-06. The directory is created once by the operator (owner = the operator, group dev,
+// mode 2770 so every capture inherits group dev) and is never chmod-ed by this client: loosening
+// it would expose captures to every account on the box.
+const sharedDebugDir = "/var/lib/billy-debug"
+
+// sharedDebugDirFor returns the shared capture directory when no override is set and the
+// directory exists; shared reports whether it was chosen.
+func sharedDebugDirFor(override, dir string) (string, bool) {
+	if override != "" {
+		return "", false
 	}
-	// MkdirAll applies the process umask, and a directory that already exists
-	// keeps the mode it was first created with, so re-assert it — the agent
-	// account's ability to open the capture depends on this bit. Best effort: an
-	// override directory owned by another account is not ours to change.
-	_ = os.Chmod(debugDir, debugDirMode)
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return dir, true
+	}
+	return "", false
+}
+
+func saveChat(messages []string, sessionID string) (string, error) {
+	debugDir, shared := sharedDebugDirFor(os.Getenv("BILLY_DEBUG_DIR"), sharedDebugDir)
+	if !shared {
+		var err error
+		debugDir, err = billyDir("BILLY_DEBUG_DIR", "debug")
+		if err != nil {
+			return "", err
+		}
+		// MkdirAll applies the process umask, and a directory that already exists
+		// keeps the mode it was first created with, so re-assert it. Best effort: an
+		// override directory owned by another account is not ours to change.
+		_ = os.Chmod(debugDir, debugDirMode)
+	}
 
 	latestPath := filepath.Join(debugDir, "billy-chat-debug-latest.md")
 	timestamp := time.Now().Format("2006-01-02-150405")
